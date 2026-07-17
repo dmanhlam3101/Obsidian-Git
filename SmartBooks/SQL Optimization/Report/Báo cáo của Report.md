@@ -9,17 +9,20 @@ Desciption: báo cáo giá trị quyết toán — đề nghị/thẩm tra/phê 
 
 1. **`pab_trans` full scan**
 	CREATE INDEX idx_pab_trans_transdate ON "pab_trans" ("TransDate");
-	> [!NOTE]
-> **Kết quả:** pab_trans sẽ không full scan nữa mà INDEX RANGE SCAN.
-> 
+```
+**Kết quả**: pab_trans sẽ không full scan nữa mà INDEX RANGE SCAN.
+```
 
 2. **** `pab_trans_item4` full scan + window sort***
 	CREATE INDEX idx_pab_trans_item4_transid ON "pab_trans_item4" ("TransID");
 		
-	> [!NOTE]
-> **Thay đổi:** thêm bộ lọc `TransID` ngay trong CTE `item_pick`.
-> **Lý do:** bản cũ tính `ROW_NUMBER()` trên **toàn bộ** `pab_trans_item4` rồi mới join → window sort trên full table.
-> **Kết quả:** chỉ rank trên tập con thuộc khoảng ngày cần báo cáo.
+	```
+		**Thay đổi:** thêm bộ lọc `TransID` ngay trong CTE `item_pick`.
+		**Lý do:** bản cũ tính `ROW_NUMBER()` trên **toàn bộ** `pab_trans_item4` rồi mới join → window sort trên full table.
+		**Kết quả:** chỉ rank trên tập con thuộc khoảng ngày cần báo cáo.
+
+	```
+
 
 ```sql
 -- item_pick: giữ nguyên phần SELECT, chỉ THÊM đoạn dưới

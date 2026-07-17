@@ -261,6 +261,12 @@ SELECT * FROM (
 > - Trong subquery có `ROW_NUMBER() OVER (PARTITION BY ProjectID...)` => Oracle phải làm tuần tự: `Đọc toàn bộ bảng project_status_item` -> `sort` -> `lọc rn = 1`
 > - Các bước này đang xuất hiện ở mọi subquery trong `Dashboard`. VD: `FindB2515Rows` ở mục `#1` làm việc này 5 lần cho cùng 1 req
 > - Mỗi request đang phải làm lại việc này nhiều lần và có thể x N lần nếu trong request đó execute nhiều mapper cùng lúc
+> 
+>
+> **Vướng mắc**
+> - Với Material view thì Oracle hỗ trợ refesh on comiit còn postgre chỉ hỗ trợ schedule hoặc thủ công thì cần đánh giá nếu tối ưu chỗ này
+
+
 
 
 ``` sql
