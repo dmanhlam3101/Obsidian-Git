@@ -172,7 +172,7 @@ GROUP BY TRUNC(A."PostDate")
 ORDER BY TRUNC(A."PostDate");
 ```
 
->Hiện trạng trong code class `GetB251DADBUseCase` -> metho `buildB2515()` đang call xuống db 4 lần để lấy ra data của:
+>Hiện trạng trong code class `GetB251DADBUseCase` -> method `buildB2515()` đang call xuống db 5 lần để lấy ra data và có 4 func có thể gộp chung lại được tránh roud-trip nhiều lần xuống DB:
 >- B2515 VC — vốn cấp per period.
 >- B2515 KLTH — khối lượng thực hiện per period.
 >- B2515 GTGN — giá trị giải ngân per period.
@@ -227,7 +227,7 @@ GROUP BY ${selectDate}
 ORDER BY ${selectDate}
 ```
 
-## **Code trong UseCase Sample**
+## **Code trong GetB251DADBUseCase**
 Trước:
 ```
 	List<B2515RawDto> vcRows   = mapper.findB2515Vc(filter, selectDate);
@@ -241,4 +241,59 @@ sau
 	List<B2515CombinedRawDto> rows = mapper.findB2515Combined(filter, selectDate);
 	Map<String, B2515CombinedRawDto> byDate = rows.stream()
 	        .collect(Collectors.toMap(B2515CombinedRawDto::getDDate, r -> r));
+```
+
+
+# 2. Tạo view cho  `project_status_item`
+
+Đây là đoạn subquery, xuất hiện rải khắp `dashboard`
+``` sql
+SELECT * FROM (
+    SELECT PSI."ProjectID", PSI."StatusID", PSI."StatusValue",
+        ROW_NUMBER() OVER (PARTITION BY PSI."ProjectID"
+            ORDER BY PSI."ProjectStatusDate" DESC, PSI."LineID" DESC) AS rn
+    FROM "project_status_item" PSI
+) t WHERE rn = 1
+```
+
+> [!NOTE] Lý do
+> - Trong  subquery có `ROW_NUMBER() OVER (PARTITION BY ProjectID...)` 
+> => orracle phải làm tuần tự  việc: `Đọc toàn bộ bảng project_status_item` -> `sort` -> `lọc rn = 1`
+> - các bước này đang xuất hiện ở mọi subquery trong `Dashboard` VD: `FindB2515Rows` ở mục `#1` làm việc này 5 lần cho cùng 1 req
+> - Mỗi request đang phải làm lại việc này nhiều lần và có thể  x N lần nếu trong request đó excute nhiều  mapper cùng lúc
+
+DDL cụ thể: 
+
+``` sql
+CREATE MATERIALIZED VIEW "mv_project_status_latest"
+BUILD IMMEDIATE
+REFRESH FAST ON COMMIT     -- cần nghiệp vụ để đánh giá nên chọn loại refresh nào(khi bảng có thay đổi, theo schedule hay thủ công)
+AS
+SELECT "ProjectID", "StatusID", "StatusValue", "ProjectStatusDate", "LineID"
+FROM (
+    SELECT "ProjectID", "StatusID", "StatusValue", "ProjectStatusDate", "LineID",
+        ROW_NUMBER() OVER (PARTITION BY "ProjectID"
+            ORDER BY "ProjectStatusDate" DESC, "LineID" DESC) AS rn
+    FROM "project_status_item"
+) WHERE rn = 1;
+
+CREATE UNIQUE INDEX "IX_MV_PROJECT_STATUS_LATEST" ON "mv_project_status_latest" ("ProjectID");
+
+```
+
+Trong code:
+
+``` sql
+-- Trước
+LEFT JOIN (
+    SELECT * FROM (
+        SELECT PSI."ProjectID", PSI."StatusID", PSI."StatusValue",
+            ROW_NUMBER() OVER (PARTITION BY PSI."ProjectID"
+                ORDER BY PSI."ProjectStatusDate" DESC, PSI."LineID" DESC) AS rn
+        FROM "project_status_item" PSI
+    ) t WHERE rn = 1
+) PSI ON A."ProjectID" = PSI."ProjectID"
+
+-- Sau
+LEFT JOIN "mv_project_status_latest" PSI ON A."ProjectID" = PSI."ProjectID"
 ```
