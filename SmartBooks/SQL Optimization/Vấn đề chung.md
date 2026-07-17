@@ -22,3 +22,4 @@ CREATE INDEX "IX_GLM_GL_BOOKS_ACCTNO5" ON "glm_gl_books" ("AccountNo5");
 > - SQL mới có thể dùng cột mới hoặc giữ nguyên các việc cũ `SUBSTR`
 > - Đảm bảo dynamic được giá trị thay đổi trong khoảng của `SUBSTR` khi AccountNo thay đổi
 
+## 2.glm_gl_books đang thiếu index

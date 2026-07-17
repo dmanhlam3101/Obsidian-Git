@@ -709,3 +709,167 @@ SELECT * FROM program_rows;
 > ```
 > 
 > nên Oracle chỉ cần đọc tập dữ liệu thỏa mãn điều kiện ngày thay vì quét toàn bộ bảng.
+
+# 5. findMasterAggregates
+
+> [!NOTE]
+> **Lý do**
+> Đang scan bảng `glm_gl_books` 9 lần trong 1 query
+> 
+>  **Giải pháp**
+> 9 scalar subquery riêng, cùng lọc `ProjectID = :projectId` nhưng lại đang full-scan 9 lần mỗi lần load
+> => scan bảng `glm_gl_books` 1 lần theo `ProjectID = :projectId`  sau đó các subquery sau dùng data temp đó để lọc
+
+ **--- SQL ---**
+
+Hiện trạng:
+```sql
+SELECT  
+    (SELECT COALESCE(SUM(A."LCAmount"), 0)  
+     FROM "glm_gl_books" A  
+     WHERE SUBSTR(A."AccountNo", 1, 3) IN ('D25', 'D26')  
+       AND A."ProjectID" = :projectId  
+       AND A."PostDate" <= :toDate  
+       AND A."PostType" = 1  
+    ) AS tongDauTu,  
+  
+    (SELECT COALESCE(SUM(A."LCAmount"), 0)  
+     FROM "glm_gl_books" A  
+     WHERE SUBSTR(A."AccountNo", 1, 3) IN ('D35', 'D36')  
+       AND A."ProjectID" = :projectId  
+       AND A."PostDate" <= :toDate  
+       AND A."PostType" = 1  
+    ) AS tongDuToan,  
+  
+    -- Bug (1): chiều so sánh ngược — ported as-is  
+    (SELECT COALESCE(SUM(A."LCAmount"), 0)  
+     FROM "glm_gl_books" A  
+     WHERE SUBSTR(A."AccountNo", 1, 3) = 'D13'  
+       AND A."ProjectID" = :projectId  
+       AND A."PostDate" <= :fromDate  
+       AND A."PostDate" >= :toDate  
+       AND A."PostType" = 1  
+       AND A."PeriodType" IN (9, 10)  
+    ) AS khvTrungHan,  
+  
+    (SELECT COALESCE(SUM(A."LCAmount"), 0)  
+     FROM "glm_gl_books" A  
+     WHERE SUBSTR(A."AccountNo", 1, 3) IN ('009', '008', '006', '007', '005')  
+       AND A."ProjectID" = :projectId  
+       AND A."PostType" = 1  
+       AND A."PostDate" <= :toDate  
+       AND A."PostDate" >= :fromDate  
+       AND A."PeriodType" = 1  
+    ) AS khvHangNam,  
+  
+    (SELECT COALESCE(SUM(A."LCAmount"), 0)  
+     FROM "glm_gl_books" A  
+     WHERE SUBSTR(A."AccountNo", 1, 3) = 'A25'  
+       AND A."ProjectID" = :projectId  
+       AND A."PostType" = 1  
+    ) AS uth,  
+  
+    -- Bug/đặc thù (3): MAX(CASE) trên nhóm (AccountNo, PostType) — ported as-is  
+    (SELECT COALESCE(MAX(CASE WHEN SUBSTR(C."AccountNo", 1, 5) = '24121' AND C."PostType" = 1 THEN C.amt ELSE 0 END), 0)  
+          - COALESCE(MAX(CASE WHEN SUBSTR(C."AccountNo", 1, 5) = '24121' AND C."PostType" = 2 THEN -C.amt ELSE 0 END), 0)  
+     FROM (  
+         SELECT A."AccountNo" AS "AccountNo", A."PostType" AS "PostType", SUM(A."LCAmount") AS amt  
+         FROM "glm_gl_books" A  
+         WHERE SUBSTR(A."AccountNo", 1, 5) = '24121'  
+           AND A."PostType" IN (1, 2)  
+           AND A."InTransTypeNo" NOT IN ('32', '33', '34', '35')  
+           AND A."PostDate" <= :toDate  
+           AND A."ProjectID" = :projectId  
+         GROUP BY A."AccountNo", A."PostType"  
+     ) C  
+    ) AS klNghiemThu,  
+  
+    -- Bug/đặc thù (3): cùng dạng MAX(CASE) theo nhóm — ported as-is  
+    (SELECT COALESCE(MAX(CASE WHEN SUBSTR(C."AccountNo", 1, 3) = '005' AND C."PostType" = 1 THEN C.amt ELSE 0 END), 0)  
+          + COALESCE(MAX(CASE WHEN SUBSTR(C."AccountNo", 1, 3) IN ('009', '008', '006', '007', '011', '012', 'Z13') AND C."PostType" = 2 THEN -C.amt ELSE 0 END), 0)  
+     FROM (  
+         SELECT A."AccountNo" AS "AccountNo", A."PostType" AS "PostType", SUM(A."LCAmount") AS amt  
+         FROM "glm_gl_books" A  
+         WHERE SUBSTR(A."AccountNo", 1, 3) IN ('009', '008', '006', '007', '011', '012', 'Z13', '005')  
+           AND A."PostType" IN (1, 2)  
+           AND A."ProjectID" = :projectId  
+         GROUP BY A."AccountNo", A."PostType"  
+     ) C  
+    ) AS klGiaiNgan,  
+  
+    (SELECT COALESCE(SUM(A."LCAmount"), 0)  
+     FROM "glm_gl_books" A  
+     WHERE SUBSTR(A."AccountNo", 1, 3) = 'C24'  
+       AND A."ProjectID" = :projectId  
+       AND A."PostType" = 1  
+    ) AS klKiemToan,  
+  
+    -- Bug (2): vế OR đầu KHÔNG có ProjectID/PostType — ported as-is  
+    (SELECT COALESCE(SUM(A."LCAmount"), 0)  
+     FROM "glm_gl_books" A  
+     WHERE (SUBSTR(A."AccountNo", 1, 5) = '24122' AND SUBSTR(A."CoAccountNo", 1, 3) IN ('211', '213'))  
+        OR (SUBSTR(A."AccountNo", 1, 5) = '24122' AND SUBSTR(A."CoAccountNo", 1, 3) IN ('343', '812', '211', '213')  
+            AND A."ProjectID" = :projectId AND A."PostType" = 2)  
+    ) AS klQuyetToan  
+FROM DUAL;
+```
+
+sau
+```sql
+WITH base AS (  
+    SELECT /*+ MATERIALIZE */  
+        A."AccountNo", A."CoAccountNo", A."PostType", A."PostDate",  
+        A."PeriodType", A."InTransTypeNo", A."LCAmount"  
+    FROM "glm_gl_books" A  
+    WHERE A."ProjectID" = :projectId  
+),  
+grouped AS (  
+    SELECT "AccountNo", "PostType", SUM("LCAmount") AS amt  
+    FROM base  
+    WHERE "PostType" IN (1, 2)  
+      AND (  
+            SUBSTR("AccountNo",1,3) IN ('009','008','006','007','011','012','Z13','005')  
+         OR (SUBSTR("AccountNo",1,5) = '24121'  
+             AND "InTransTypeNo" NOT IN ('32','33','34','35')  
+             AND "PostDate" <= :toDate)  
+      )  
+    GROUP BY "AccountNo", "PostType"  
+)  
+SELECT  
+    COALESCE(m.tongDauTu, 0)   AS tongDauTu,  
+    COALESCE(m.tongDuToan, 0)  AS tongDuToan,  
+    COALESCE(m.khvTrungHan, 0) AS khvTrungHan,  
+    COALESCE(m.khvHangNam, 0)  AS khvHangNam,  
+    COALESCE(m.uth, 0)         AS uth,  
+    COALESCE(m.klKiemToan, 0)  AS klKiemToan,  
+    (SELECT COALESCE(MAX(CASE WHEN g."PostType"=1 THEN g.amt ELSE 0 END),0)  
+          - COALESCE(MAX(CASE WHEN g."PostType"=2 THEN -g.amt ELSE 0 END),0)  
+     FROM grouped g  
+     WHERE SUBSTR(g."AccountNo",1,5) = '24121') AS klNghiemThu,  
+    (SELECT COALESCE(MAX(CASE WHEN SUBSTR(g."AccountNo",1,3)='005' AND g."PostType"=1 THEN g.amt ELSE 0 END),0)  
+          + COALESCE(MAX(CASE WHEN SUBSTR(g."AccountNo",1,3) IN ('009','008','006','007','011','012','Z13') AND g."PostType"=2 THEN -g.amt ELSE 0 END),0)  
+     FROM grouped g  
+     WHERE SUBSTR(g."AccountNo",1,3) IN ('009','008','006','007','011','012','Z13','005')) AS klGiaiNgan,  
+    (SELECT COALESCE(SUM(A."LCAmount"),0)   -- OR-branch không lọc ProjectID: bug ported as-is  
+     FROM "glm_gl_books" A  
+     WHERE (SUBSTR(A."AccountNo",1,5)='24122' AND SUBSTR(A."CoAccountNo",1,3) IN ('211','213'))  
+        OR (SUBSTR(A."AccountNo",1,5)='24122' AND SUBSTR(A."CoAccountNo",1,3) IN ('343','812','211','213')  
+            AND A."ProjectID" = :projectId AND A."PostType" = 2)  
+    ) AS klQuyetToan  
+FROM (  
+    SELECT  
+        SUM(CASE WHEN SUBSTR("AccountNo",1,3) IN ('D25','D26') AND "PostType"=1 AND "PostDate"<=:toDate THEN "LCAmount" ELSE 0 END) AS tongDauTu,  
+        SUM(CASE WHEN SUBSTR("AccountNo",1,3) IN ('D35','D36') AND "PostType"=1 AND "PostDate"<=:toDate THEN "LCAmount" ELSE 0 END) AS tongDuToan,  
+        SUM(CASE WHEN SUBSTR("AccountNo",1,3)='D13' AND "PostType"=1 AND "PeriodType" IN (9,10)  
+                 AND "PostDate"<=:fromDate AND "PostDate">=:toDate THEN "LCAmount" ELSE 0 END) AS khvTrungHan,  -- bug đảo chiều: as-is  
+        SUM(CASE WHEN SUBSTR("AccountNo",1,3) IN ('009','008','006','007','005') AND "PostType"=1 AND "PeriodType"=1  
+                 AND "PostDate"<=:toDate AND "PostDate">=:fromDate THEN "LCAmount" ELSE 0 END) AS khvHangNam,  
+        SUM(CASE WHEN SUBSTR("AccountNo",1,3)='A25' AND "PostType"=1 THEN "LCAmount" ELSE 0 END) AS uth,  
+        SUM(CASE WHEN SUBSTR("AccountNo",1,3)='C24' AND "PostType"=1 THEN "LCAmount" ELSE 0 END) AS klKiemToan  
+    FROM base  
+) m
+```
+
+> [!NOTE]
+> Query sau sửa sẽ còn full scan bảng `glm_gl_books` 2 lần 
+> Vẫn dư lên 1 lần thành 2 là bởi vì trong code có đoạn fix bug PHP và sql đó k lọc theo ProjectID
