@@ -262,9 +262,6 @@ SELECT * FROM (
 > - Các bước này đang xuất hiện ở mọi subquery trong `Dashboard`. VD: `FindB2515Rows` ở mục `#1` làm việc này 5 lần cho cùng 1 req
 > - Mỗi request đang phải làm lại việc này nhiều lần và có thể x N lần nếu trong request đó execute nhiều mapper cùng lúc
 > 
->
-> **Vướng mắc**
-> - Với Material view thì Oracle hỗ trợ refesh on comiit còn postgre chỉ hỗ trợ schedule hoặc thủ công thì cần đánh giá nếu tối ưu chỗ này
 
 
 
@@ -272,7 +269,7 @@ SELECT * FROM (
 ``` sql
 CREATE MATERIALIZED VIEW "mv_project_status_latest"
 BUILD IMMEDIATE
-REFRESH FAST ON COMMIT     -- cần nghiệp vụ để đánh giá nên chọn loại refresh nào(khi bảng có thay đổi, theo schedule hay thủ công)
+REFRESH COMPLETE ON DEMAND    -- cần nghiệp vụ để đánh giá nên chọn loại refresh nào( theo schedule hay thủ công)
 AS
 SELECT "ProjectID", "StatusID", "StatusValue", "ProjectStatusDate", "LineID"
 FROM (
