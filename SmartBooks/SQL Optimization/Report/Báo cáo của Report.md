@@ -48,9 +48,8 @@ WITH item_pick AS (
 ```
 
 3.  **`project` full scan (nhánh rootproj)**
-
-	 ```sql
-	 leaf_base AS (  
+```sql
+leaf_base AS (  
     SELECT  
         PA."TransNo"       AS transNo,  
         PA."TransDate"     AS td,  
@@ -76,45 +75,46 @@ WITH item_pick AS (
       AND PA."TransDate" <= :toDate  
       AND EXISTS (SELECT 1 FROM "project_cate" PC WHERE PC."ProjectID" = A."ProjectID")  
     leaf AS (  
-	    SELECT  
-	        rootProj || '#' || flag || '#' || TO_CHAR(expenseId) || '#' || TO_CHAR(transItemId) AS itemId,  
-	        TO_CHAR(expenseId)                        AS parentId,  
-	        CASE WHEN flag = '**' THEN 3 ELSE 4 END   AS lvl,  
-	        description                               AS itemName,  
-	        CAST(NULL AS VARCHAR2(255))               AS itemNo,  
-	        transNo                                   AS transNo,  
-	        td                                        AS td,  
-	        1 AS allowPrint, 0 AS fontWeight, 0 AS italic, 0 AS center,  
-	        :expenseShow                               AS isShow,  
-	        SUM(i1) AS i1, SUM(i2) AS i2, SUM(i3) AS i3,  
-	        rootProj                                  AS rootProj,  
-	        rootProjNum                               AS rootProjNum,  
-	        flag                                      AS flag,  
-	        TO_CHAR(expenseId)                        AS expenseId,  
-	        MIN(cateName)                             AS cateName,  
-	        MIN(projectName)                          AS projectName,  
-	        MIN(tabmisNo)                             AS tabmisNo,  
-	        MIN(TO_CHAR(parentPid))                   AS parentPid  
-	    FROM leaf_base  
-	    GROUP BY rootProj,rootProjNum, flag, expenseId, transItemId, description, transNo, td  
+        SELECT  
+            rootProj || '#' || flag || '#' || TO_CHAR(expenseId) || '#' || TO_CHAR(transItemId) AS itemId,  
+            TO_CHAR(expenseId)                        AS parentId,  
+            CASE WHEN flag = '**' THEN 3 ELSE 4 END   AS lvl,  
+            description                               AS itemName,  
+            CAST(NULL AS VARCHAR2(255))               AS itemNo,  
+            transNo                                   AS transNo,  
+            td                                        AS td,  
+            1 AS allowPrint, 0 AS fontWeight, 0 AS italic, 0 AS center,  
+            :expenseShow                               AS isShow,  
+            SUM(i1) AS i1, SUM(i2) AS i2, SUM(i3) AS i3,  
+            rootProj                                  AS rootProj,  
+            rootProjNum                               AS rootProjNum,  
+            flag                                      AS flag,  
+            TO_CHAR(expenseId)                        AS expenseId,  
+            MIN(cateName)                             AS cateName,  
+            MIN(projectName)                          AS projectName,  
+            MIN(tabmisNo)                             AS tabmisNo,  
+            MIN(TO_CHAR(parentPid))                   AS parentPid  
+        FROM leaf_base  
+        GROUP BY rootProj,rootProjNum, flag, expenseId, transItemId, description, transNo, td  
 ),  
-	rootproj AS (  
-	    SELECT  
-	        l.rootProj                   AS itemId,  
-	        CAST(NULL AS VARCHAR2(255))  AS parentId,  
-	        1                            AS lvl,  
-	        MIN(P."ProjectName")         AS itemName,  
-	        MIN(P."TabmisNo")            AS itemNo,  
-	        CAST(NULL AS VARCHAR2(255))  AS transNo,  
-	        MAX(l.td)                    AS td,  
-	        1 AS allowPrint, 1 AS fontWeight, 0 AS italic, 0 AS center, 1 AS isShow,  
-	        SUM(l.i1) AS i1, SUM(l.i2) AS i2, SUM(l.i3) AS i3  
-	    FROM leaf l  
-	    JOIN "project" P ON P."ProjectID" = l.rootProjNum  
-	    WHERE l.flag <> '**'  
-	    GROUP BY l.rootProj  
-),  
-	 ```
+    rootproj AS (  
+        SELECT  
+            l.rootProj                   AS itemId,  
+            CAST(NULL AS VARCHAR2(255))  AS parentId,  
+            1                            AS lvl,  
+            MIN(P."ProjectName")         AS itemName,  
+            MIN(P."TabmisNo")            AS itemNo,  
+            CAST(NULL AS VARCHAR2(255))  AS transNo,  
+            MAX(l.td)                    AS td,  
+            1 AS allowPrint, 1 AS fontWeight, 0 AS italic, 0 AS center, 1 AS isShow,  
+            SUM(l.i1) AS i1, SUM(l.i2) AS i2, SUM(l.i3) AS i3  
+        FROM leaf l  
+        JOIN "project" P ON P."ProjectID" = l.rootProjNum  
+        WHERE l.flag <> '**'  
+        GROUP BY l.rootProj  
+),
+```
+
 
 > Tại `leaf_base` select thêm `rootProjNum`
 > ```
