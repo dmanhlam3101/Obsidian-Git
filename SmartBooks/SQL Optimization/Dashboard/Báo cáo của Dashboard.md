@@ -223,6 +223,7 @@ AND P."Level" = 1
 AND (A."InTransTypeID" NOT IN (32,33,34,35) OR A."InTransTypeID" IS NULL)  
 AND A."PostDate" >= :fromDate  
 AND A."PostDate" <= :toDate  
+AND (PSI."StatusID" = 34 OR PSI."StatusID" IS NULL) 
 GROUP BY ${selectDate}  
 ORDER BY ${selectDate}
 ```
