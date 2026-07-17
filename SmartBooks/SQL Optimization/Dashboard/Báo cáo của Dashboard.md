@@ -256,13 +256,12 @@ SELECT * FROM (
 ) t WHERE rn = 1
 ```
 
-> [!NOTE] Lý do
-> - Trong  subquery có `ROW_NUMBER() OVER (PARTITION BY ProjectID...)` 
-> => orracle phải làm tuần tự  việc: `Đọc toàn bộ bảng project_status_item` -> `sort` -> `lọc rn = 1`
-> - các bước này đang xuất hiện ở mọi subquery trong `Dashboard` VD: `FindB2515Rows` ở mục `#1` làm việc này 5 lần cho cùng 1 req
-> - Mỗi request đang phải làm lại việc này nhiều lần và có thể  x N lần nếu trong request đó excute nhiều  mapper cùng lúc
+> [!NOTE]
+> **Lý do**
+> - Trong subquery có `ROW_NUMBER() OVER (PARTITION BY ProjectID...)` => Oracle phải làm tuần tự: `Đọc toàn bộ bảng project_status_item` -> `sort` -> `lọc rn = 1`
+> - Các bước này đang xuất hiện ở mọi subquery trong `Dashboard`. VD: `FindB2515Rows` ở mục `#1` làm việc này 5 lần cho cùng 1 req
+> - Mỗi request đang phải làm lại việc này nhiều lần và có thể x N lần nếu trong request đó execute nhiều mapper cùng lúc
 
-DDL cụ thể: 
 
 ``` sql
 CREATE MATERIALIZED VIEW "mv_project_status_latest"
