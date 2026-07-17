@@ -20,7 +20,6 @@ Desciption: báo cáo giá trị quyết toán — đề nghị/thẩm tra/phê 
 		**Thay đổi:** thêm bộ lọc `TransID` ngay trong CTE `item_pick`.
 		**Lý do:** bản cũ tính `ROW_NUMBER()` trên **toàn bộ** `pab_trans_item4` rồi mới join → window sort trên full table.
 		**Kết quả:** chỉ rank trên tập con thuộc khoảng ngày cần báo cáo.
-
 	```
 
 
