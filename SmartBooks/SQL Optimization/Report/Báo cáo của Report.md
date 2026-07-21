@@ -882,7 +882,7 @@ Với dữ liệu bảng glm_gl_books 1 triệu bản ghi cost giảm từ 245K 
 
 > [!NOTE]
 > **Lý do**
-> Đang scan bảng `glm_gl_books` 9 lần trong 1 query
+> Đang scan bảng `glm_gl_books` 8 lần trong 1 query
 > 
 >  **Giải pháp**
 > 1 LẦN SCAN duy nhất thay cho 8 lần. Điều kiện của mỗi nhánh gốc được đưa vào CASE WHEN riêng, KHÔNG đổi ngữ nghĩa, KHÔNG gộp cột.
@@ -1457,4 +1457,1004 @@ Với dữ liệu bảng glm_gl_books 1 triệu bản ghi cost giảm từ 245K 
 
 # 7. B209Leaf
 	Làm tương tự với `6. B209M1Leaf` vì Cùng pattern với B209M1
+
+# 8.findMb07QtdaRows
+
+> [!NOTE]
+> **Lý do**
+> Đang scan bảng `glm_gl_books` 7 lần trong 1 query
+> 
+>  **Giải pháp**
+> 1 LẦN SCAN duy nhất thay cho 7 lần. KHÔNG đổi ngữ nghĩa, KHÔNG gộp cột để giảm tải việc roud-trip xuống db => sau đó giữ nguyên nghiệp vụ cũ
+
+Hiện trạng:
+```sql
+SELECT "itemId","parentId","level","itemName","itemName1","itemName2",  
+       SUM("i1") AS "i1", SUM("i2") AS "i2"  
+FROM (  
+    -- 1. Contracts: A#01#VendorNo#ContractNo  
+    SELECT 'A#01#' || A."VendorNo" || '#' || A."ContractNo" AS "itemId",  
+           '' AS "parentId", 1 AS "level", NULL AS "itemName",  
+           MAX(A."VendorName") AS "itemName1", MAX(A."ContractName") AS "itemName2",  
+           SUM(CASE WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=1 THEN A."LCAmount"  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=2 THEN -A."LCAmount" ELSE 0 END) AS "i1",  
+           SUM(CASE WHEN ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+                       OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1))  
+                    THEN A."LCAmount"*(3-2*A."PostType") ELSE 0 END) AS "i2"  
+    FROM "glm_gl_books" A INNER JOIN "contract" CT ON A."ContractID"=CT."ContractID" AND CT."DocumentType"=1  
+    WHERE A."VendorNo"!='' AND A."ContractNo"!='' AND A."InTransTypeID" NOT IN (33,34,35)  
+      AND EXTRACT(YEAR FROM A."PostDate") <= :year  
+      AND ((SUBSTR(A."AccountNo",1,4)='2412')  
+        OR ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+         OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1)))  
+      AND SUBSTR(A."CompanyNo",1,LENGTH(:companyNoPrefix)) = :companyNoPrefix  -- nếu filter.companyNoPrefix != null  
+      AND A."CompanyID" = :companyId                                          -- nếu filter.companyId != null  
+      AND A."ProjectID" = :projectId                                          -- nếu filter.projectId != null  
+      AND A."VendorID" = :vendorId                                            -- nếu filter.vendorId != null  
+      AND A."PartnerID" = :partnerId                                          -- nếu filter.partnerId != null  
+    GROUP BY A."VendorNo", A."ContractNo"  
+  
+    UNION ALL  
+  
+    -- 2. Clearance self-cost: A#02#ClearanceNo (I1 loại trừ QLDA)  
+    SELECT 'A#02#' || A."ClearanceNo" AS "itemId",  
+           '' AS "parentId", 1 AS "level", NULL AS "itemName",  
+           MAX(A."CompanyName") AS "itemName1", MAX(A."ClearanceName") AS "itemName2",  
+           SUM(CASE WHEN SUBSTR(A."ExpenseNo",1,6)='119803' THEN 0  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=1 THEN A."LCAmount"  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=2 THEN -A."LCAmount" ELSE 0 END) AS "i1",  
+           SUM(CASE WHEN ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+                       OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1))  
+                    THEN A."LCAmount"*(3-2*A."PostType") ELSE 0 END) AS "i2"  
+    FROM "glm_gl_books" A INNER JOIN "expense" E ON A."ExpenseID"=E."ExpenseID"  
+    WHERE A."ClearanceNo"!='' AND E."isSelfpccosts"=1 AND A."InTransTypeID" NOT IN (33,34,35)  
+      AND EXTRACT(YEAR FROM A."PostDate") <= :year  
+      AND ((SUBSTR(A."AccountNo",1,4)='2412')  
+        OR ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+         OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1)))  
+      AND SUBSTR(A."CompanyNo",1,LENGTH(:companyNoPrefix)) = :companyNoPrefix  
+      AND A."CompanyID" = :companyId  
+      AND A."ProjectID" = :projectId  
+      AND A."VendorID" = :vendorId  
+      AND A."PartnerID" = :partnerId  
+    GROUP BY A."ClearanceNo"  
+  
+    UNION ALL  
+  
+    -- 3. Clearance other-cost: A#03#ClearanceNo (I1 loại trừ QLDA)  
+    SELECT 'A#03#' || A."ClearanceNo" AS "itemId",  
+           '' AS "parentId", 1 AS "level", NULL AS "itemName",  
+           MAX(A."PartnerName") AS "itemName1", MAX(A."ClearanceName") AS "itemName2",  
+           SUM(CASE WHEN SUBSTR(A."ExpenseNo",1,6)='119803' THEN 0  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=1 THEN A."LCAmount"  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=2 THEN -A."LCAmount" ELSE 0 END) AS "i1",  
+           SUM(CASE WHEN ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+                       OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1))  
+                    THEN A."LCAmount"*(3-2*A."PostType") ELSE 0 END) AS "i2"  
+    FROM "glm_gl_books" A INNER JOIN "expense" E ON A."ExpenseID"=E."ExpenseID"  
+    WHERE A."ClearanceNo"!='' AND E."isSelfpccosts"!=1 AND A."InTransTypeID" NOT IN (33,34,35)  
+      AND EXTRACT(YEAR FROM A."PostDate") <= :year  
+      AND ((SUBSTR(A."AccountNo",1,4)='2412')  
+        OR ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+         OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1)))  
+      AND SUBSTR(A."CompanyNo",1,LENGTH(:companyNoPrefix)) = :companyNoPrefix  
+      AND A."CompanyID" = :companyId  
+      AND A."ProjectID" = :projectId  
+      AND A."VendorID" = :vendorId  
+      AND A."PartnerID" = :partnerId  
+    GROUP BY A."ClearanceNo"  
+  
+    UNION ALL  
+  
+    -- 4a. Partner QLDA: A#04#1#PartnerNo  
+    SELECT 'A#04#1#' || A."PartnerNo" AS "itemId",  
+           '' AS "parentId", 1 AS "level", NULL AS "itemName",  
+           MAX(A."PartnerName") AS "itemName1", 'Chi phí QLDA' AS "itemName2",  
+           SUM(CASE WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=1 THEN A."LCAmount"  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=2 THEN -A."LCAmount" ELSE 0 END) AS "i1",  
+           SUM(CASE WHEN ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+                       OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1))  
+                    THEN A."LCAmount"*(3-2*A."PostType") ELSE 0 END) AS "i2"  
+    FROM "glm_gl_books" A INNER JOIN "expense" E ON A."ExpenseID"=E."ExpenseID"  
+    WHERE A."VendorNo"='' AND A."ContractNo"='' AND A."ClearanceNo"='' AND A."PartnerNo"!=''  
+      AND SUBSTR(A."ExpenseNo",1,6)='119803' AND A."InTransTypeID" NOT IN (33,34,35)  
+      AND EXTRACT(YEAR FROM A."PostDate") <= :year  
+      AND ((SUBSTR(A."AccountNo",1,4)='2412')  
+        OR ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+         OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1)))  
+      AND SUBSTR(A."CompanyNo",1,LENGTH(:companyNoPrefix)) = :companyNoPrefix  
+      AND A."CompanyID" = :companyId  
+      AND A."ProjectID" = :projectId  
+      AND A."VendorID" = :vendorId  
+      AND A."PartnerID" = :partnerId  
+    GROUP BY A."PartnerNo"  
+  
+    UNION ALL  
+  
+    -- 4b. Partner other: A#04#2#PartnerNo#ExpenseNo (I1 loại trừ QLDA)  
+    SELECT 'A#04#2#' || A."PartnerNo" || '#' || A."ExpenseNo" AS "itemId",  
+           '' AS "parentId", 1 AS "level", NULL AS "itemName",  
+           MAX(A."PartnerName") AS "itemName1", MAX(E."ExpenseName") AS "itemName2",  
+           SUM(CASE WHEN SUBSTR(A."ExpenseNo",1,6)='119803' THEN 0  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=1 THEN A."LCAmount"  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=2 THEN -A."LCAmount" ELSE 0 END) AS "i1",  
+           SUM(CASE WHEN ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+                       OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1))  
+                    THEN A."LCAmount"*(3-2*A."PostType") ELSE 0 END) AS "i2"  
+    FROM "glm_gl_books" A INNER JOIN "expense" E ON A."ExpenseID"=E."ExpenseID"  
+    WHERE A."VendorNo"='' AND A."ContractNo"='' AND A."ClearanceNo"='' AND A."PartnerNo"!=''  
+      AND SUBSTR(A."ExpenseNo",1,6)!='119803' AND SUBSTR(A."ExpenseNo",1,3)='201'  
+      AND A."InTransTypeID" NOT IN (33,34,35)  
+      AND EXTRACT(YEAR FROM A."PostDate") <= :year  
+      AND ((SUBSTR(A."AccountNo",1,4)='2412')  
+        OR ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+         OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1)))  
+      AND SUBSTR(A."CompanyNo",1,LENGTH(:companyNoPrefix)) = :companyNoPrefix  
+      AND A."CompanyID" = :companyId  
+      AND A."ProjectID" = :projectId  
+      AND A."VendorID" = :vendorId  
+      AND A."PartnerID" = :partnerId  
+    GROUP BY A."PartnerNo", A."ExpenseNo"  
+  
+    UNION ALL  
+  
+    -- 5a. Unidentified QLDA: A#05#1#ExpenseNo  
+    SELECT 'A#05#1#' || A."ExpenseNo" AS "itemId",  
+           '' AS "parentId", 1 AS "level", NULL AS "itemName",  
+           'Đối tượng chưa xác định' AS "itemName1", 'Chi phí quản lý dự án' AS "itemName2",  
+           SUM(CASE WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=1 THEN A."LCAmount"  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=2 THEN -A."LCAmount" ELSE 0 END) AS "i1",  
+           SUM(CASE WHEN ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+                       OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1))  
+                    THEN A."LCAmount"*(3-2*A."PostType") ELSE 0 END) AS "i2"  
+    FROM "glm_gl_books" A INNER JOIN "expense" E ON A."ExpenseID"=E."ExpenseID"  
+    WHERE A."ClearanceNo"='' AND A."ContractNo"='' AND A."VendorNo"='' AND A."PartnerNo"=''  
+      AND SUBSTR(A."ExpenseNo",1,6)='119803' AND A."InTransTypeID" NOT IN (33,34,35)  
+      AND EXTRACT(YEAR FROM A."PostDate") <= :year  
+      AND ((SUBSTR(A."AccountNo",1,4)='2412')  
+        OR ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+         OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1)))  
+      AND SUBSTR(A."CompanyNo",1,LENGTH(:companyNoPrefix)) = :companyNoPrefix  
+      AND A."CompanyID" = :companyId  
+      AND A."ProjectID" = :projectId  
+      AND A."VendorID" = :vendorId  
+      AND A."PartnerID" = :partnerId  
+    GROUP BY A."ExpenseNo"  
+  
+    UNION ALL  
+  
+    -- 5b. Unidentified other: A#05#2#ExpenseNo (I1 loại trừ QLDA)  
+    SELECT 'A#05#2#' || A."ExpenseNo" AS "itemId",  
+           '' AS "parentId", 1 AS "level", NULL AS "itemName",  
+           'Đối tượng chưa xác định' AS "itemName1", MAX(E."ExpenseName") AS "itemName2",  
+           SUM(CASE WHEN SUBSTR(A."ExpenseNo",1,6)='119803' THEN 0  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=1 THEN A."LCAmount"  
+                    WHEN SUBSTR(A."AccountNo",1,4)='2412' AND A."PostType"=2 THEN -A."LCAmount" ELSE 0 END) AS "i1",  
+           SUM(CASE WHEN ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+                       OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1))  
+                    THEN A."LCAmount"*(3-2*A."PostType") ELSE 0 END) AS "i2"  
+    FROM "glm_gl_books" A INNER JOIN "expense" E ON A."ExpenseID"=E."ExpenseID"  
+    WHERE A."ClearanceNo"='' AND A."ContractNo"='' AND A."VendorNo"='' AND A."PartnerNo"=''  
+      AND SUBSTR(A."ExpenseNo",1,6)!='119803' AND A."InTransTypeID" NOT IN (33,34,35)  
+      AND EXTRACT(YEAR FROM A."PostDate") <= :year  
+      AND ((SUBSTR(A."AccountNo",1,4)='2412')  
+        OR ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+         OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1)))  
+      AND SUBSTR(A."CompanyNo",1,LENGTH(:companyNoPrefix)) = :companyNoPrefix  
+      AND A."CompanyID" = :companyId  
+      AND A."ProjectID" = :projectId  
+      AND A."VendorID" = :vendorId  
+      AND A."PartnerID" = :partnerId  
+    GROUP BY A."ExpenseNo"  
+) agg  
+GROUP BY "itemId","parentId","level","itemName","itemName1","itemName2"  
+ORDER BY "itemId";
+```
+
+
+sau:
+```sql
+  
+WITH gl_grp AS (  
+    SELECT /*+ MATERIALIZE */  
+        A."VendorNo"      AS vendorNo,  
+        A."ContractNo"    AS contractNo,  
+        A."ContractID"    AS contractId,  
+        A."ClearanceNo"   AS clearanceNo,  
+        A."PartnerNo"     AS partnerNo,  
+        A."ExpenseNo"     AS expenseNo,  
+        A."ExpenseID"     AS expenseId,  
+        A."AccountNo"     AS accountNo,        
+        A."PostType"      AS postType,         
+        A."LCAmount"      AS lcAmount,        
+        A."VendorName"    AS vendorName,       
+        A."ContractName"  AS contractName,  
+        A."CompanyName"   AS companyName,  
+        A."ClearanceName" AS clearanceName,  
+        A."PartnerName"   AS partnerName  
+    FROM "glm_gl_books_v1" A  
+    WHERE A."InTransTypeID" NOT IN (33,34,35)  
+      AND EXTRACT(YEAR FROM A."PostDate") <= :year  
+      AND ((SUBSTR(A."AccountNo",1,4)='2412')  
+        OR ((SUBSTR(A."AccountNo",1,3) IN ('006','007','008','009','011','012','013','Z13') AND A."PostType"=2)  
+         OR (SUBSTR(A."AccountNo",1,3)='005' AND A."PostType"=1)))  
+      AND SUBSTR(A."CompanyNo",1,LENGTH(:companyNoPrefix)) = :companyNoPrefix  -- nếu có filter  
+      AND A."CompanyID" = :companyId    -- nếu có filter  
+      AND A."ProjectID" = :projectId    -- nếu có filter  
+      AND A."VendorID"  = :vendorId     -- nếu có filter  
+      AND A."PartnerID" = :partnerId    -- nếu có filter  
+)  
+SELECT "itemId","parentId","level","itemName","itemName1","itemName2",  
+       SUM("i1") AS "i1", SUM("i2") AS "i2"  
+FROM (  
+  
+    SELECT 'A#01#' || G.vendorNo || '#' || G.contractNo AS "itemId",  
+           '' AS "parentId", 1 AS "level", NULL AS "itemName",  
+           MAX(G.vendorName) AS "itemName1", MAX(G.contractName) AS "itemName2",  
+           SUM(CASE WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=1 THEN G.lcAmount  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=2 THEN -G.lcAmount ELSE 0 END) AS "i1",  
+           SUM(CASE WHEN ((SUBSTR(G.accountNo,1,3) IN ('006','007','008','009','011','012','013','Z13') AND G.postType=2)  
+                       OR (SUBSTR(G.accountNo,1,3)='005' AND G.postType=1))  
+                    THEN G.lcAmount*(3-2*G.postType) ELSE 0 END) AS "i2"  
+    FROM gl_grp G  
+    INNER JOIN "contract" CT ON G.contractId = CT."ContractID" AND CT."DocumentType" = 1  
+    WHERE G.vendorNo != '' AND G.contractNo != ''  
+    GROUP BY G.vendorNo, G.contractNo  
+  
+    UNION ALL  
+  
+    SELECT 'A#02#' || G.clearanceNo,  
+           '', 1, NULL,  
+           MAX(G.companyName), MAX(G.clearanceName),  
+           SUM(CASE WHEN SUBSTR(G.expenseNo,1,6)='119803' THEN 0  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=1 THEN G.lcAmount  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=2 THEN -G.lcAmount ELSE 0 END),  
+           SUM(CASE WHEN ((SUBSTR(G.accountNo,1,3) IN ('006','007','008','009','011','012','013','Z13') AND G.postType=2)  
+                       OR (SUBSTR(G.accountNo,1,3)='005' AND G.postType=1))  
+                    THEN G.lcAmount*(3-2*G.postType) ELSE 0 END)  
+    FROM gl_grp G  
+    INNER JOIN "expense" E ON G.expenseId = E."ExpenseID"  
+    WHERE G.clearanceNo != '' AND E."isSelfpccosts" = 1  
+    GROUP BY G.clearanceNo  
+  
+    UNION ALL  
+  
+    SELECT 'A#03#' || G.clearanceNo,  
+           '', 1, NULL,  
+           MAX(G.partnerName), MAX(G.clearanceName),  
+           SUM(CASE WHEN SUBSTR(G.expenseNo,1,6)='119803' THEN 0  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=1 THEN G.lcAmount  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=2 THEN -G.lcAmount ELSE 0 END),  
+           SUM(CASE WHEN ((SUBSTR(G.accountNo,1,3) IN ('006','007','008','009','011','012','013','Z13') AND G.postType=2)  
+                       OR (SUBSTR(G.accountNo,1,3)='005' AND G.postType=1))  
+                    THEN G.lcAmount*(3-2*G.postType) ELSE 0 END)  
+    FROM gl_grp G  
+    INNER JOIN "expense" E ON G.expenseId = E."ExpenseID"  
+    WHERE G.clearanceNo != '' AND E."isSelfpccosts" != 1  
+    GROUP BY G.clearanceNo  
+  
+    UNION ALL  
+  
+    SELECT 'A#04#1#' || G.partnerNo,  
+           '', 1, NULL,  
+           MAX(G.partnerName), 'Chi phí QLDA',  
+           SUM(CASE WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=1 THEN G.lcAmount  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=2 THEN -G.lcAmount ELSE 0 END),  
+           SUM(CASE WHEN ((SUBSTR(G.accountNo,1,3) IN ('006','007','008','009','011','012','013','Z13') AND G.postType=2)  
+                       OR (SUBSTR(G.accountNo,1,3)='005' AND G.postType=1))  
+                    THEN G.lcAmount*(3-2*G.postType) ELSE 0 END)  
+    FROM gl_grp G  
+    INNER JOIN "expense" E ON G.expenseId = E."ExpenseID"  
+    WHERE G.vendorNo='' AND G.contractNo='' AND G.clearanceNo='' AND G.partnerNo != ''  
+      AND SUBSTR(G.expenseNo,1,6)='119803'  
+    GROUP BY G.partnerNo  
+  
+    UNION ALL  
+  
+    SELECT 'A#04#2#' || G.partnerNo || '#' || G.expenseNo,  
+           '', 1, NULL,  
+           MAX(G.partnerName), MAX(E."ExpenseName"),  
+           SUM(CASE WHEN SUBSTR(G.expenseNo,1,6)='119803' THEN 0  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=1 THEN G.lcAmount  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=2 THEN -G.lcAmount ELSE 0 END),  
+           SUM(CASE WHEN ((SUBSTR(G.accountNo,1,3) IN ('006','007','008','009','011','012','013','Z13') AND G.postType=2)  
+                       OR (SUBSTR(G.accountNo,1,3)='005' AND G.postType=1))  
+                    THEN G.lcAmount*(3-2*G.postType) ELSE 0 END)  
+    FROM gl_grp G  
+    INNER JOIN "expense" E ON G.expenseId = E."ExpenseID"  
+    WHERE G.vendorNo='' AND G.contractNo='' AND G.clearanceNo='' AND G.partnerNo != ''  
+      AND SUBSTR(G.expenseNo,1,6) != '119803' AND SUBSTR(G.expenseNo,1,3)='201'  
+    GROUP BY G.partnerNo, G.expenseNo  
+  
+    UNION ALL  
+  
+    SELECT 'A#05#1#' || G.expenseNo,  
+           '', 1, NULL,  
+           'Đối tượng chưa xác định', 'Chi phí quản lý dự án',  
+           SUM(CASE WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=1 THEN G.lcAmount  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=2 THEN -G.lcAmount ELSE 0 END),  
+           SUM(CASE WHEN ((SUBSTR(G.accountNo,1,3) IN ('006','007','008','009','011','012','013','Z13') AND G.postType=2)  
+                       OR (SUBSTR(G.accountNo,1,3)='005' AND G.postType=1))  
+                    THEN G.lcAmount*(3-2*G.postType) ELSE 0 END)  
+    FROM gl_grp G  
+    INNER JOIN "expense" E ON G.expenseId = E."ExpenseID"  
+    WHERE G.clearanceNo='' AND G.contractNo='' AND G.vendorNo='' AND G.partnerNo=''  
+      AND SUBSTR(G.expenseNo,1,6)='119803'  
+    GROUP BY G.expenseNo  
+  
+    UNION ALL  
+  
+    SELECT 'A#05#2#' || G.expenseNo,  
+           '', 1, NULL,  
+           'Đối tượng chưa xác định', MAX(E."ExpenseName"),  
+           SUM(CASE WHEN SUBSTR(G.expenseNo,1,6)='119803' THEN 0  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=1 THEN G.lcAmount  
+                    WHEN SUBSTR(G.accountNo,1,4)='2412' AND G.postType=2 THEN -G.lcAmount ELSE 0 END),  
+           SUM(CASE WHEN ((SUBSTR(G.accountNo,1,3) IN ('006','007','008','009','011','012','013','Z13') AND G.postType=2)  
+                       OR (SUBSTR(G.accountNo,1,3)='005' AND G.postType=1))  
+                    THEN G.lcAmount*(3-2*G.postType) ELSE 0 END)  
+    FROM gl_grp G  
+    INNER JOIN "expense" E ON G.expenseId = E."ExpenseID"  
+    WHERE G.clearanceNo='' AND G.contractNo='' AND G.vendorNo='' AND G.partnerNo=''  
+      AND SUBSTR(G.expenseNo,1,6) != '119803'  
+    GROUP BY G.expenseNo  
+) agg  
+GROUP BY "itemId","parentId","level","itemName","itemName1","itemName2"  
+ORDER BY "itemId";
+```
+
+Với dữ liệu bảng glm_gl_books 1 triệu bản ghi cost giảm từ 81968 -> xuống 27292
+
+
+# 9.findB222Leaf
+
+> [!NOTE]
+> **Lý do**
+> Đang scan bảng `glm_gl_books` 5 lần trong 1 query
+> 
+>  **Giải pháp**
+> 1 LẦN SCAN duy nhất thay cho 5 lần. KHÔNG đổi ngữ nghĩa, KHÔNG gộp cột để giảm tải việc roud-trip xuống db => sau đó giữ nguyên nghiệp vụ cũ
+
+Hiện trạng:
+```sql
+-- ===== TH1: hợp đồng (key = ContractID) =====  
+SELECT  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END || '#ContractID' || TO_CHAR(A."ContractID") AS "itemId",  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END AS "parentId",  
+    2 AS "level",  
+    MIN(A."ContractName") AS "itemName", MIN(A."TabmisNo") AS "tabmisNo",  
+  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3) IN ('091','092') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i1,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3) IN ('093','094') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i2,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=1  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i5,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=2  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i7,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i6,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=2  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i8,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=1  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i9n,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=2  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i9c,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i10n,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=2  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i10c,  
+    SUM(CASE WHEN A."PostType"=2 AND (  
+            (SUBSTR(A."AccountNo",1,4)='2412' AND SUBSTR(A."CoAccountNo",1,3) IN ('211','213'))  
+         OR (SUBSTR(A."AccountNo",1,4)='2432' AND SUBSTR(A."CoAccountNo",1,3) IN ('343','812','211','213')))  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i11,  
+    SUM(CASE WHEN A."PostType"=2 AND (  
+            (SUBSTR(A."AccountNo",1,4)='2412' AND SUBSTR(A."CoAccountNo",1,3) IN ('211','213'))  
+         OR (SUBSTR(A."AccountNo",1,4)='2432' AND SUBSTR(A."CoAccountNo",1,3) IN ('343','812','211','213')))  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i12,  
+  
+    (SELECT COALESCE(SUM(CQ."Quantity"),0) FROM "contract_quantity" CQ WHERE CQ."ContractID" = A."ContractID") AS i3,  
+    (SELECT COALESCE(SUM(CQ."LCAmount"),0) FROM "contract_quantity" CQ WHERE CQ."ContractID" = A."ContractID") AS i4  
+FROM "glm_gl_books" A  
+JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+WHERE EC."CateNo" IN ('201520101','201520102','201520103','201520104','201520105','201520108')  
+  AND ((A."ContractID" IS NOT NULL AND A."ContractID" > 0)  
+    OR (A."VendorID" IS NOT NULL AND A."VendorID" > 0)  
+    OR (A."PartnerID" IS NOT NULL AND A."PartnerID" > 0))  
+  AND A."ProjectID" = :projectId          -- nếu filter.projectId != null  
+  AND A."ProjectNo" = :projectNo          -- nếu filter.projectNo != null  
+  AND A."ProvinceNo" = :provinceNo        -- nếu filter.provinceNo != null  
+  AND A."DistrictNo" = :districtNo        -- nếu filter.districtNo != null  
+  AND A."CommuneNo" = :communeNo          -- nếu filter.communeNo != null  
+  -- === companyCondition (chọn đúng 1 nhánh theo kind) ===  AND A."CompanyManagementLevel" >= :managementLevel                              -- kind = MANAGEMENT_LEVEL_GTE  
+  -- AND A."CompanyID" IN (:companyIds)                                           -- kind = ID_IN  -- AND A."CompanyID" = :companyId                                              -- kind = ID_EQ  -- AND SUBSTR(A."CompanyNo",1,:companyNoPrefixLength) = :companyNoPrefix       -- kind = NO_PREFIX  -- ========================================================GROUP BY  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END,  
+    A."ContractID"  
+  
+UNION ALL  
+  
+-- ===== TH2: khoản-chi không hợp đồng/nghiệm thu (key = ExpenseID), A5/A8 → Level 1 leaf =====  
+SELECT  
+    CASE WHEN (CASE EC."CateNo"  
+                    WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+                    WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+                    WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+                    WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+               END) IN ('A5','A8')  
+         THEN (CASE EC."CateNo"  
+                    WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+                    WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+                    WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+                    WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+               END)  
+         ELSE (CASE EC."CateNo"  
+                    WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+                    WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+                    WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+                    WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+               END) || '#ExpenseID' || TO_CHAR(A."ExpenseID")  
+    END AS "itemId",  
+    CASE WHEN (CASE EC."CateNo"  
+                    WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+                    WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+                    WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+                    WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+               END) IN ('A5','A8')  
+         THEN CAST(NULL AS VARCHAR2(1))  
+         ELSE (CASE EC."CateNo"  
+                    WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+                    WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+                    WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+                    WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+               END)  
+    END AS "parentId",  
+    CASE WHEN (CASE EC."CateNo"  
+                    WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+                    WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+                    WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+                    WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+               END) IN ('A5','A8')  
+         THEN 1 ELSE 2  
+    END AS "level",  
+    MIN(A."ExpenseName") AS "itemName", MIN(A."TabmisNo") AS "tabmisNo",  
+  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3) IN ('091','092') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i1,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3) IN ('093','094') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i2,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=1  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i5,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=2  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i7,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i6,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=2  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i8,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=1  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i9n,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=2  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i9c,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i10n,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=2  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i10c,  
+    SUM(CASE WHEN A."PostType"=2 AND (  
+            (SUBSTR(A."AccountNo",1,4)='2412' AND SUBSTR(A."CoAccountNo",1,3) IN ('211','213'))  
+         OR (SUBSTR(A."AccountNo",1,4)='2432' AND SUBSTR(A."CoAccountNo",1,3) IN ('343','812','211','213')))  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i11,  
+    SUM(CASE WHEN A."PostType"=2 AND (  
+            (SUBSTR(A."AccountNo",1,4)='2412' AND SUBSTR(A."CoAccountNo",1,3) IN ('211','213'))  
+         OR (SUBSTR(A."AccountNo",1,4)='2432' AND SUBSTR(A."CoAccountNo",1,3) IN ('343','812','211','213')))  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i12,  
+  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='094' AND A."PostType"=1  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i3,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='094' AND A."PostType"=1  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i4  
+FROM "glm_gl_books" A  
+JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+WHERE EC."CateNo" IN ('201520101','201520102','201520103','201520104','201520105','201520106','201520108','201520109')  
+  AND (A."ContractID" IS NULL OR A."ContractID" = 0) AND (A."ClearanceID" IS NULL OR A."ClearanceID" = 0)  
+  AND A."ProjectID" = :projectId  
+  AND A."ProjectNo" = :projectNo  
+  AND A."ProvinceNo" = :provinceNo  
+  AND A."DistrictNo" = :districtNo  
+  AND A."CommuneNo" = :communeNo  
+  AND A."CompanyManagementLevel" >= :managementLevel  
+  -- (hoặc 1 trong 3 nhánh companyCondition khác, xem TH1)  
+GROUP BY  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END,  
+    A."ExpenseID"  
+  
+UNION ALL  
+  
+-- ===== TH3a: nghiệm thu — cột kế toán (key = A2#ClearanceID<v>), I3/I4=0 =====  
+SELECT  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END || '#ClearanceID' || TO_CHAR(A."ClearanceID") AS "itemId",  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END AS "parentId",  
+    2 AS "level",  
+    MIN(A."ClearanceName") AS "itemName", MIN(A."TabmisNo") AS "tabmisNo",  
+  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3) IN ('091','092') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i1,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3) IN ('093','094') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i2,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=1  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i5,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=2  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i7,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i6,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,3)='073' AND A."PostType"=2  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i8,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=1  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i9n,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=2  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i9c,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=1  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN A."LCAmount" ELSE 0 END) AS i10n,  
+    SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2412','2431') AND A."PostType"=2  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (35,34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i10c,  
+    SUM(CASE WHEN A."PostType"=2 AND (  
+            (SUBSTR(A."AccountNo",1,4)='2412' AND SUBSTR(A."CoAccountNo",1,3) IN ('211','213'))  
+         OR (SUBSTR(A."AccountNo",1,4)='2432' AND SUBSTR(A."CoAccountNo",1,3) IN ('343','812','211','213')))  
+        AND A."PostDate" >= :fromDate AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i11,  
+    SUM(CASE WHEN A."PostType"=2 AND (  
+            (SUBSTR(A."AccountNo",1,4)='2412' AND SUBSTR(A."CoAccountNo",1,3) IN ('211','213'))  
+         OR (SUBSTR(A."AccountNo",1,4)='2432' AND SUBSTR(A."CoAccountNo",1,3) IN ('343','812','211','213')))  
+        AND A."PostDate" <= :toDate  
+        AND (A."InTransTypeID" IS NULL OR A."InTransTypeID" NOT IN (34,33,32))  
+        THEN -A."LCAmount" ELSE 0 END) AS i12,  
+  
+    0 AS i3, 0 AS i4  
+FROM "glm_gl_books" A  
+JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+WHERE EC."CateNo" = '201520102'  
+  AND (A."ContractID" IS NULL OR A."ContractID" = 0) AND (A."ClearanceID" IS NOT NULL AND A."ClearanceID" > 0)  
+  AND A."ProjectID" = :projectId  
+  AND A."ProjectNo" = :projectNo  
+  AND A."ProvinceNo" = :provinceNo  
+  AND A."DistrictNo" = :districtNo  
+  AND A."CommuneNo" = :communeNo  
+  AND A."CompanyManagementLevel" >= :managementLevel  
+  -- (hoặc 1 trong 3 nhánh companyCondition khác, xem TH1)  
+GROUP BY  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END,  
+    A."ClearanceID"  
+  
+UNION ALL  
+  
+-- ===== TH3b: nghiệm thu — I3/I4 từ clearance_quantity (key = A2#<v>, KHÔNG có 'ClearanceID') =====  
+SELECT  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END || '#' || TO_CHAR(A."ClearanceID") AS "itemId",  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END AS "parentId",  
+    2 AS "level",  
+    (SELECT MIN(CQ."ClearanceName") FROM "clearance_quantity" CQ WHERE CQ."ClearanceID" = A."ClearanceID") AS "itemName",  
+    MIN(A."TabmisNo") AS "tabmisNo",  
+    0 AS i1, 0 AS i2, 0 AS i5, 0 AS i7, 0 AS i6, 0 AS i8,  
+    0 AS i9n, 0 AS i9c, 0 AS i10n, 0 AS i10c, 0 AS i11, 0 AS i12,  
+    (SELECT COALESCE(SUM(CQ."LCAmount"),0) FROM "clearance_quantity" CQ WHERE CQ."ClearanceID" = A."ClearanceID") AS i3,  
+    (SELECT COALESCE(SUM(CQ."LCAmount"),0) FROM "clearance_quantity" CQ WHERE CQ."ClearanceID" = A."ClearanceID") AS i4  
+FROM "glm_gl_books" A  
+JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+WHERE EC."CateNo" = '201520102'  
+  AND (A."ContractID" IS NULL OR A."ContractID" = 0) AND (A."ClearanceID" IS NOT NULL AND A."ClearanceID" > 0)  
+  AND A."ProjectID" = :projectId  
+  AND A."ProjectNo" = :projectNo  
+  AND A."ProvinceNo" = :provinceNo  
+  AND A."DistrictNo" = :districtNo  
+  AND A."CommuneNo" = :communeNo  
+  AND A."CompanyManagementLevel" >= :managementLevel  
+  -- (hoặc 1 trong 3 nhánh companyCondition khác, xem TH1)  
+GROUP BY  
+    CASE EC."CateNo"  
+        WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'  
+        WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'  
+        WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'  
+        WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'  
+    END,  
+    A."ClearanceID";
+```
+
+
+sau:
+```sql
+WITH gl_grp AS (
+    SELECT /*+ MATERIALIZE */
+        CASE EC."CateNo"
+            WHEN '201520101' THEN 'A1' WHEN '201520102' THEN 'A2'
+            WHEN '201520103' THEN 'A3' WHEN '201520104' THEN 'A4'
+            WHEN '201520106' THEN 'A5' WHEN '201520105' THEN 'A6'
+            WHEN '201520108' THEN 'A7' WHEN '201520109' THEN 'A8'
+        END           AS cate,
+        A."ContractID"    AS contractId,
+        A."ExpenseID"     AS expenseId,
+        A."ClearanceID"   AS clearanceId,
+        A."VendorID"      AS vendorId,
+        A."PartnerID"     AS partnerId,
+        A."AccountNo"     AS accountNo,
+        A."CoAccountNo"   AS coAccountNo,
+        A."PostType"      AS postType,
+        A."PostDate"      AS postDate,
+        A."InTransTypeID" AS inTransTypeId,
+        A."LCAmount"      AS lcAmount,
+        A."ContractName"  AS contractName,
+        A."ExpenseName"   AS expenseName,
+        A."ClearanceName" AS clearanceName,
+        A."TabmisNo"      AS tabmisNo
+    FROM "glm_gl_books" A
+    JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"
+    WHERE EC."CateNo" IN ('201520101','201520102','201520103','201520104','201520105','201520106','201520108','201520109')
+      AND A."ProjectID" = :projectId          -- nếu filter.projectId != null
+      AND A."ProjectNo" = :projectNo          -- nếu filter.projectNo != null
+      AND A."ProvinceNo" = :provinceNo        -- nếu filter.provinceNo != null
+      AND A."DistrictNo" = :districtNo        -- nếu filter.districtNo != null
+      AND A."CommuneNo" = :communeNo          -- nếu filter.communeNo != null
+      -- companyCondition: chọn đúng 1 nhánh theo kind (giống bản gốc)
+      AND A."CompanyManagementLevel" >= :managementLevel
+      -- (hoặc ID_IN / ID_EQ / NO_PREFIX)
+)
+SELECT "itemId","parentId","level","itemName","tabmisNo",
+       i1, i2, i5, i7, i6, i8, i9n, i9c, i10n, i10c, i11, i12, i3, i4
+FROM (
+
+    -- ===== TH1: hợp đồng (key = ContractID) =====
+    SELECT
+        G.cate || '#ContractID' || TO_CHAR(G.contractId) AS "itemId",
+        G.cate AS "parentId",
+        2 AS "level",
+        MIN(G.contractName) AS "itemName", MIN(G.tabmisNo) AS "tabmisNo",
+
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3) IN ('091','092') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i1,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3) IN ('093','094') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i2,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=1
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i5,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=2
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i7,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i6,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=2
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i8,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=1
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i9n,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=2
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i9c,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i10n,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=2
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i10c,
+        SUM(CASE WHEN G.postType=2 AND (
+                (SUBSTR(G.accountNo,1,4)='2412' AND SUBSTR(G.coAccountNo,1,3) IN ('211','213'))
+             OR (SUBSTR(G.accountNo,1,4)='2432' AND SUBSTR(G.coAccountNo,1,3) IN ('343','812','211','213')))
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i11,
+        SUM(CASE WHEN G.postType=2 AND (
+                (SUBSTR(G.accountNo,1,4)='2412' AND SUBSTR(G.coAccountNo,1,3) IN ('211','213'))
+             OR (SUBSTR(G.accountNo,1,4)='2432' AND SUBSTR(G.coAccountNo,1,3) IN ('343','812','211','213')))
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i12,
+
+        (SELECT COALESCE(SUM(CQ."Quantity"),0) FROM "contract_quantity" CQ WHERE CQ."ContractID" = G.contractId) AS i3,
+        (SELECT COALESCE(SUM(CQ."LCAmount"),0) FROM "contract_quantity" CQ WHERE CQ."ContractID" = G.contractId) AS i4
+    FROM gl_grp G
+    WHERE G.cate IN ('A1','A2','A3','A4','A6','A7')
+      AND ((G.contractId IS NOT NULL AND G.contractId > 0)
+        OR (G.vendorId  IS NOT NULL AND G.vendorId  > 0)
+        OR (G.partnerId IS NOT NULL AND G.partnerId > 0))
+    GROUP BY G.cate, G.contractId
+
+    UNION ALL
+
+    -- ===== TH2: khoản-chi không hợp đồng/nghiệm thu (key = ExpenseID) =====
+    SELECT
+        CASE WHEN G.cate IN ('A5','A8') THEN G.cate
+             ELSE G.cate || '#ExpenseID' || TO_CHAR(G.expenseId) END AS "itemId",
+        CASE WHEN G.cate IN ('A5','A8') THEN CAST(NULL AS VARCHAR2(1))
+             ELSE G.cate END AS "parentId",
+        CASE WHEN G.cate IN ('A5','A8') THEN 1 ELSE 2 END AS "level",
+        MIN(G.expenseName) AS "itemName", MIN(G.tabmisNo) AS "tabmisNo",
+
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3) IN ('091','092') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i1,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3) IN ('093','094') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i2,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=1
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i5,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=2
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i7,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i6,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=2
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i8,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=1
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i9n,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=2
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i9c,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i10n,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=2
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i10c,
+        SUM(CASE WHEN G.postType=2 AND (
+                (SUBSTR(G.accountNo,1,4)='2412' AND SUBSTR(G.coAccountNo,1,3) IN ('211','213'))
+             OR (SUBSTR(G.accountNo,1,4)='2432' AND SUBSTR(G.coAccountNo,1,3) IN ('343','812','211','213')))
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i11,
+        SUM(CASE WHEN G.postType=2 AND (
+                (SUBSTR(G.accountNo,1,4)='2412' AND SUBSTR(G.coAccountNo,1,3) IN ('211','213'))
+             OR (SUBSTR(G.accountNo,1,4)='2432' AND SUBSTR(G.coAccountNo,1,3) IN ('343','812','211','213')))
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i12,
+
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='094' AND G.postType=1
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i3,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='094' AND G.postType=1
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i4
+    FROM gl_grp G
+    WHERE (G.contractId IS NULL OR G.contractId = 0)
+      AND (G.clearanceId IS NULL OR G.clearanceId = 0)
+    GROUP BY G.cate, G.expenseId
+
+    UNION ALL
+
+    -- ===== TH3a: nghiệm thu — cột kế toán (key = A2#ClearanceID<v>), I3/I4=0 =====
+    SELECT
+        G.cate || '#ClearanceID' || TO_CHAR(G.clearanceId) AS "itemId",
+        G.cate AS "parentId",
+        2 AS "level",
+        MIN(G.clearanceName) AS "itemName", MIN(G.tabmisNo) AS "tabmisNo",
+
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3) IN ('091','092') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i1,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3) IN ('093','094') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i2,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=1
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i5,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=2
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i7,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i6,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,3)='073' AND G.postType=2
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i8,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=1
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i9n,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=2
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i9c,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=1
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN G.lcAmount ELSE 0 END) AS i10n,
+        SUM(CASE WHEN SUBSTR(G.accountNo,1,4) IN ('2412','2431') AND G.postType=2
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (35,34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i10c,
+        SUM(CASE WHEN G.postType=2 AND (
+                (SUBSTR(G.accountNo,1,4)='2412' AND SUBSTR(G.coAccountNo,1,3) IN ('211','213'))
+             OR (SUBSTR(G.accountNo,1,4)='2432' AND SUBSTR(G.coAccountNo,1,3) IN ('343','812','211','213')))
+            AND G.postDate >= :fromDate AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i11,
+        SUM(CASE WHEN G.postType=2 AND (
+                (SUBSTR(G.accountNo,1,4)='2412' AND SUBSTR(G.coAccountNo,1,3) IN ('211','213'))
+             OR (SUBSTR(G.accountNo,1,4)='2432' AND SUBSTR(G.coAccountNo,1,3) IN ('343','812','211','213')))
+            AND G.postDate <= :toDate
+            AND (G.inTransTypeId IS NULL OR G.inTransTypeId NOT IN (34,33,32))
+            THEN -G.lcAmount ELSE 0 END) AS i12,
+
+        0 AS i3, 0 AS i4
+    FROM gl_grp G
+    WHERE G.cate = 'A2'
+      AND (G.contractId IS NULL OR G.contractId = 0)
+      AND (G.clearanceId IS NOT NULL AND G.clearanceId > 0)
+    GROUP BY G.cate, G.clearanceId
+
+    UNION ALL
+
+    -- ===== TH3b: nghiệm thu — I3/I4 từ clearance_quantity (key = A2#<v>, quirk giữ nguyên) =====
+    SELECT
+        G.cate || '#' || TO_CHAR(G.clearanceId) AS "itemId",
+        G.cate AS "parentId",
+        2 AS "level",
+        (SELECT MIN(CQ."ClearanceName") FROM "clearance_quantity" CQ WHERE CQ."ClearanceID" = G.clearanceId) AS "itemName",
+        MIN(G.tabmisNo) AS "tabmisNo",
+        0 AS i1, 0 AS i2, 0 AS i5, 0 AS i7, 0 AS i6, 0 AS i8,
+        0 AS i9n, 0 AS i9c, 0 AS i10n, 0 AS i10c, 0 AS i11, 0 AS i12,
+        (SELECT COALESCE(SUM(CQ."LCAmount"),0) FROM "clearance_quantity" CQ WHERE CQ."ClearanceID" = G.clearanceId) AS i3,
+        (SELECT COALESCE(SUM(CQ."LCAmount"),0) FROM "clearance_quantity" CQ WHERE CQ."ClearanceID" = G.clearanceId) AS i4
+    FROM gl_grp G
+    WHERE G.cate = 'A2'
+      AND (G.contractId IS NULL OR G.contractId = 0)
+      AND (G.clearanceId IS NOT NULL AND G.clearanceId > 0)
+    GROUP BY G.cate, G.clearanceId
+
+) t;
+```
+
+Với dữ liệu bảng glm_gl_books 1 triệu bản ghi cost giảm từ 109K -> xuống 27363
+
+
 
