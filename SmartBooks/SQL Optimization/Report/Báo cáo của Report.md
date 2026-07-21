@@ -873,3 +873,588 @@ FROM (
 > [!NOTE]
 > Query sau sửa sẽ còn full scan bảng `glm_gl_books` 2 lần 
 > Vẫn dư lên 1 lần thành 2 là bởi vì trong code có đoạn fix bug PHP và sql đó k lọc theo ProjectID
+
+
+Với dữ liệu bảng glm_gl_books 1 triệu bản ghi cost giảm từ 245K -> xuống 54584
+
+
+# 6. B209M1Leaf
+
+> [!NOTE]
+> **Lý do**
+> Đang scan bảng `glm_gl_books` 9 lần trong 1 query
+> 
+>  **Giải pháp**
+> 1 LẦN SCAN duy nhất thay cho 8 lần. Điều kiện của mỗi nhánh gốc được đưa vào CASE WHEN riêng, KHÔNG đổi ngữ nghĩa, KHÔNG gộp cột.
+
+ **--- SQL ---**
+
+Hiện trạng:
+
+```sql
+  
+WITH leaves AS (  
+    -- Sub 1: I2 - LCAmount dương, tài khoản 2431/2412  
+    SELECT  
+        A."ProjectNo" || '#' || EC."CateNo" || '#' || EC."ExpenseNo" AS "ItemID",  
+        A."ProjectNo"                       AS "EntityID",  
+        A."ProjectNo" || '#' || EC."CateNo" AS "ParentID",  
+        MIN(A."ExpenseName")                AS "ItemName",  
+        A."ProjectNo"                       AS "ProjectNo",  
+        MIN(A."ProjectName")                AS "ProjectName",  
+        EC."ExpenseNo"                      AS "ExpenseNo",  
+        EC."CateNo"                         AS "ExpenseCateNo",  
+        MIN(A."ExpenseName")                AS "ExpenseName",  
+        A."ContractNo"                      AS "ContractNo",  
+        MIN(A."ContractID")                 AS "ContractID",  
+        A."VendorNo"                        AS "VendorNo",  
+        A."PartnerNo"                       AS "PartnerNo",  
+        A."ClearanceNo"                     AS "ClearanceNo",  
+        SUM(A."LCAmount") AS "I2", 0 AS "I4", 0 AS "I5", 0 AS "I6"  
+    FROM "glm_gl_books_v1" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND SUBSTR(A."AccountNo",1,4) IN ('2431','2412')  
+      AND A."InTransTypeID" NOT IN (33,34,35)  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+      -- === m1WhereBase (tùy filter truyền vào) ===  
+      AND SUBSTR(A."CompanyNo", 1, :companyPrefixLen) = :companyNoPrefix   -- nếu filter.companyNoPrefix != null  
+      AND A."ProjectNo" LIKE :projectNo || '%'                              -- nếu filter.projectNo != null  
+      AND A."ProvinceNo" = :provinceNo                                     -- nếu filter.provinceNo != null  
+      AND A."CommuneNo" = :communeNo                                       -- nếu filter.communeNo != null  
+      AND A."ProjectID" = :projectId                                       -- nếu filter.projectId != null  
+      -- ============================================      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+    HAVING SUM(A."LCAmount") > 0  
+  
+    UNION ALL  
+  
+    -- Sub 2: I4 - tạm ứng nhóm 1 (008xxx/009xx/004xx/006xx, 014/097)  
+    SELECT  
+        A."ProjectNo" || '#' || EC."CateNo" || '#' || EC."ExpenseNo" AS "ItemID",  
+        A."ProjectNo"                       AS "EntityID",  
+        A."ProjectNo" || '#' || EC."CateNo" AS "ParentID",  
+        MIN(A."ExpenseName")                AS "ItemName",  
+        A."ProjectNo"                       AS "ProjectNo",  
+        MIN(A."ProjectName")                AS "ProjectName",  
+        EC."ExpenseNo"                      AS "ExpenseNo",  
+        EC."CateNo"                         AS "ExpenseCateNo",  
+        MIN(A."ExpenseName")                AS "ExpenseName",  
+        A."ContractNo"                      AS "ContractNo",  
+        MIN(A."ContractID")                 AS "ContractID",  
+        A."VendorNo"                        AS "VendorNo",  
+        A."PartnerNo"                       AS "PartnerNo",  
+        A."ClearanceNo"                     AS "ClearanceNo",  
+        0 AS "I2", -SUM(A."LCAmount") AS "I4", 0 AS "I5", 0 AS "I6"  
+    FROM "glm_gl_books_v1" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND A."InTransTypeID" IN (2,11,21,7,17,26)  
+      AND A."PostType" = 2  
+      AND (SUBSTR(A."AccountNo",1,6) IN ('008111','008121','008211','008221')  
+        OR SUBSTR(A."AccountNo",1,5) IN ('00911','00921','00931','00411','00421','00621','00611')  
+        OR SUBSTR(A."AccountNo",1,3) IN ('014','097'))  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+      -- + m1WhereBase (giống trên)  
+      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+    HAVING SUM(A."LCAmount") != 0  
+  
+    UNION ALL  
+  
+    -- Sub 3: I4 - tài khoản 013, PostType=2  
+    SELECT  
+        A."ProjectNo" || '#' || EC."CateNo" || '#' || EC."ExpenseNo" AS "ItemID",  
+        A."ProjectNo"                       AS "EntityID",  
+        A."ProjectNo" || '#' || EC."CateNo" AS "ParentID",  
+        MIN(A."ExpenseName")                AS "ItemName",  
+        A."ProjectNo"                       AS "ProjectNo",  
+        MIN(A."ProjectName")                AS "ProjectName",  
+        EC."ExpenseNo"                      AS "ExpenseNo",  
+        EC."CateNo"                         AS "ExpenseCateNo",  
+        MIN(A."ExpenseName")                AS "ExpenseName",  
+        A."ContractNo"                      AS "ContractNo",  
+        MIN(A."ContractID")                 AS "ContractID",  
+        A."VendorNo"                        AS "VendorNo",  
+        A."PartnerNo"                       AS "PartnerNo",  
+        A."ClearanceNo"                     AS "ClearanceNo",  
+        0 AS "I2", -SUM(A."LCAmount") AS "I4", 0 AS "I5", 0 AS "I6"  
+    FROM "glm_gl_books_v1" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND A."PostType" = 2  
+      AND SUBSTR(A."AccountNo",1,3) IN ('013')  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+      -- + m1WhereBase  
+      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+    HAVING SUM(A."LCAmount") != 0  
+  
+    UNION ALL  
+  
+    -- Sub 4: I5 - hoàn ứng nhóm 1 (bao gồm 012/013/014/097), toàn kỳ đến toDate  
+    SELECT  
+        A."ProjectNo" || '#' || EC."CateNo" || '#' || EC."ExpenseNo" AS "ItemID",  
+        A."ProjectNo"                       AS "EntityID",  
+        A."ProjectNo" || '#' || EC."CateNo" AS "ParentID",  
+        MIN(A."ExpenseName")                AS "ItemName",  
+        A."ProjectNo"                       AS "ProjectNo",  
+        MIN(A."ProjectName")                AS "ProjectName",  
+        EC."ExpenseNo"                      AS "ExpenseNo",  
+        EC."CateNo"                         AS "ExpenseCateNo",  
+        MIN(A."ExpenseName")                AS "ExpenseName",  
+        A."ContractNo"                      AS "ContractNo",  
+        MIN(A."ContractID")                 AS "ContractID",  
+        A."VendorNo"                        AS "VendorNo",  
+        A."PartnerNo"                       AS "PartnerNo",  
+        A."ClearanceNo"                     AS "ClearanceNo",  
+        0 AS "I2", 0 AS "I4", -SUM(A."LCAmount") AS "I5", 0 AS "I6"  
+    FROM "glm_gl_books_v1" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND A."InTransTypeID" IN (3,12,22,8,18,27,30,38,36)  
+      AND A."PostType" = 2  
+      AND (SUBSTR(A."AccountNo",1,6) IN ('008112','008122','008212','008222')  
+        OR SUBSTR(A."AccountNo",1,5) IN ('00912','00922','00932','00412','00422','00622','00612')  
+        OR SUBSTR(A."AccountNo",1,3) IN ('012','014','013','097'))  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+      -- + m1WhereBase  
+      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+    HAVING SUM(A."LCAmount") != 0  
+  
+    UNION ALL  
+  
+    -- Sub 5: I5 - hoàn ứng tài khoản 013, GIỚI HẠN trong khoảng fromDate..toDate  
+    SELECT  
+        A."ProjectNo" || '#' || EC."CateNo" || '#' || EC."ExpenseNo" AS "ItemID",  
+        A."ProjectNo"                       AS "EntityID",  
+        A."ProjectNo" || '#' || EC."CateNo" AS "ParentID",  
+        MIN(A."ExpenseName")                AS "ItemName",  
+        A."ProjectNo"                       AS "ProjectNo",  
+        MIN(A."ProjectName")                AS "ProjectName",  
+        EC."ExpenseNo"                      AS "ExpenseNo",  
+        EC."CateNo"                         AS "ExpenseCateNo",  
+        MIN(A."ExpenseName")                AS "ExpenseName",  
+        A."ContractNo"                      AS "ContractNo",  
+        MIN(A."ContractID")                 AS "ContractID",  
+        A."VendorNo"                        AS "VendorNo",  
+        A."PartnerNo"                       AS "PartnerNo",  
+        A."ClearanceNo"                     AS "ClearanceNo",  
+        0 AS "I2", 0 AS "I4", -SUM(A."LCAmount") AS "I5", 0 AS "I6"  
+    FROM "glm_gl_books_v1" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" >= TO_DATE(:fromDateIso,'YYYY-MM-DD')  
+      AND A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND A."PostType" = 2  
+      AND SUBSTR(A."AccountNo",1,3) IN ('013')  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+      -- + m1WhereBase  
+      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+    HAVING SUM(A."LCAmount") != 0  
+  
+    UNION ALL  
+  
+    -- Sub 6: I6 - nhóm InTransTypeID (2,11,21,14,7,17,26), PostType=2  
+    SELECT  
+        A."ProjectNo" || '#' || EC."CateNo" || '#' || EC."ExpenseNo" AS "ItemID",  
+        A."ProjectNo"                       AS "EntityID",  
+        A."ProjectNo" || '#' || EC."CateNo" AS "ParentID",  
+        MIN(A."ExpenseName")                AS "ItemName",  
+        A."ProjectNo"                       AS "ProjectNo",  
+        MIN(A."ProjectName")                AS "ProjectName",  
+        EC."ExpenseNo"                      AS "ExpenseNo",  
+        EC."CateNo"                         AS "ExpenseCateNo",  
+        MIN(A."ExpenseName")                AS "ExpenseName",  
+        A."ContractNo"                      AS "ContractNo",  
+        MIN(A."ContractID")                 AS "ContractID",  
+        A."VendorNo"                        AS "VendorNo",  
+        A."PartnerNo"                       AS "PartnerNo",  
+        A."ClearanceNo"                     AS "ClearanceNo",  
+        0 AS "I2", 0 AS "I4", 0 AS "I5", -SUM(A."LCAmount") AS "I6"  
+    FROM "glm_gl_books_v1" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND A."InTransTypeID" IN (2,11,21,14,7,17,26)  
+      AND A."PostType" = 2  
+      AND (SUBSTR(A."AccountNo",1,6) IN ('008111','008121','008211','008221')  
+        OR SUBSTR(A."AccountNo",1,5) IN ('00911','00921','00931','00411','00421','00621','00611')  
+        OR SUBSTR(A."AccountNo",1,3) IN ('014','097'))  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+      -- + m1WhereBase  
+      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+    HAVING SUM(A."LCAmount") != 0  
+  
+    UNION ALL  
+  
+    -- Sub 7: I6 - nhóm InTransTypeID (4,13,23,14), PostType=2 (không lọc theo AccountNo cụ thể trong join này nhưng vẫn có điều kiện account như trên)  
+    SELECT  
+        A."ProjectNo" || '#' || EC."CateNo" || '#' || EC."ExpenseNo" AS "ItemID",  
+        A."ProjectNo"                       AS "EntityID",  
+        A."ProjectNo" || '#' || EC."CateNo" AS "ParentID",  
+        MIN(A."ExpenseName")                AS "ItemName",  
+        A."ProjectNo"                       AS "ProjectNo",  
+        MIN(A."ProjectName")                AS "ProjectName",  
+        EC."ExpenseNo"                      AS "ExpenseNo",  
+        EC."CateNo"                         AS "ExpenseCateNo",  
+        MIN(A."ExpenseName")                AS "ExpenseName",  
+        A."ContractNo"                      AS "ContractNo",  
+        MIN(A."ContractID")                 AS "ContractID",  
+        A."VendorNo"                        AS "VendorNo",  
+        A."PartnerNo"                       AS "PartnerNo",  
+        A."ClearanceNo"                     AS "ClearanceNo",  
+        0 AS "I2", 0 AS "I4", 0 AS "I5", -SUM(A."LCAmount") AS "I6"  
+    FROM "glm_gl_books_v1" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND A."InTransTypeID" IN (4,13,23,14)  
+      AND A."PostType" = 2  
+      AND (SUBSTR(A."AccountNo",1,6) IN ('008111','008121','008211','008221')  
+        OR SUBSTR(A."AccountNo",1,5) IN ('00911','00921','00931','00411','00421','00621','00611')  
+        OR SUBSTR(A."AccountNo",1,3) IN ('014','097'))  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+      -- + m1WhereBase  
+      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+    HAVING SUM(A."LCAmount") != 0  
+  
+    UNION ALL  
+  
+    -- Sub 8: I6 - tài khoản 013, PostType=1  
+    SELECT  
+        A."ProjectNo" || '#' || EC."CateNo" || '#' || EC."ExpenseNo" AS "ItemID",  
+        A."ProjectNo"                       AS "EntityID",  
+        A."ProjectNo" || '#' || EC."CateNo" AS "ParentID",  
+        MIN(A."ExpenseName")                AS "ItemName",  
+        A."ProjectNo"                       AS "ProjectNo",  
+        MIN(A."ProjectName")                AS "ProjectName",  
+        EC."ExpenseNo"                      AS "ExpenseNo",  
+        EC."CateNo"                         AS "ExpenseCateNo",  
+        MIN(A."ExpenseName")                AS "ExpenseName",  
+        A."ContractNo"                      AS "ContractNo",  
+        MIN(A."ContractID")                 AS "ContractID",  
+        A."VendorNo"                        AS "VendorNo",  
+        A."PartnerNo"                       AS "PartnerNo",  
+        A."ClearanceNo"                     AS "ClearanceNo",  
+        0 AS "I2", 0 AS "I4", 0 AS "I5", -SUM(A."LCAmount") AS "I6"  
+    FROM "glm_gl_books_v1" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND A."PostType" = 1  
+      AND SUBSTR(A."AccountNo",1,3) IN ('013')  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+      -- + m1WhereBase  
+      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+    HAVING SUM(A."LCAmount") != 0  
+),  
+  
+glm094 AS (  
+    SELECT A."ExpenseNo" AS en, A."ProjectNo" AS pn, SUM(A."LCAmount") AS s  
+    FROM "glm_gl_books_v1" A  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND A."PostType" = 1  
+      AND SUBSTR(A."AccountNo",1,3) = '094'  
+      -- + m1WhereBase (áp dụng trực tiếp trên A, không qua EC)  
+    GROUP BY A."ExpenseNo", A."ProjectNo"  
+),  
+  
+cq AS (  
+    SELECT "ContractID" AS cid, "VendorNo" AS vn, "ExpenseNo" AS en, SUM("LCAmount") AS amt  
+    FROM "contract_quantity"  
+    GROUP BY "ContractID", "VendorNo", "ExpenseNo"  
+),  
+  
+ctid AS (  
+    SELECT "ContractID" AS cid, MAX("DocumentType") AS dt  
+    FROM "contract"  
+    GROUP BY "ContractID"  
+),  
+  
+ctno AS (  
+    SELECT "ContractNo" AS cno, MIN("ContractID") AS cid, MAX("DocumentType") AS dt  
+    FROM "contract"  
+    GROUP BY "ContractNo"  
+),  
+  
+classified AS (  
+    SELECT l.*,  
+        CASE  
+            WHEN l."ClearanceNo" IS NULL AND l."ContractNo" IS NULL AND v."VendorName" IS NOT NULL THEN '6'  
+            WHEN l."VendorNo" IS NULL AND l."ContractNo" IS NULL AND l."ClearanceNo" IS NULL THEN '5'  
+            WHEN l."ContractNo" IS NULL AND l."ClearanceNo" IS NOT NULL THEN '4'  
+            WHEN l."ClearanceNo" IS NULL AND l."ContractNo" IS NOT NULL AND p."PartnerName" IS NOT NULL THEN '2'  
+            WHEN l."ClearanceNo" IS NULL AND l."ContractNo" IS NOT NULL AND v."VendorName" IS NOT NULL THEN '1'  
+            WHEN l."ContractNo" IS NOT NULL AND l."ClearanceNo" IS NOT NULL AND v."VendorName" IS NOT NULL THEN '3'  
+        END AS "TH",  
+        v."VendorName" AS vname,  
+        p."PartnerName" AS pname  
+    FROM leaves l  
+    LEFT JOIN "vendor"  v ON v."VendorNo"  = l."VendorNo"  
+    LEFT JOIN "partner" p ON p."PartnerNo" = l."PartnerNo"  
+),  
+  
+resolved AS (  
+    SELECT  
+        c."ItemID", c."EntityID", c."ParentID", c."ItemName", c."ProjectNo", c."ProjectName",  
+        c."ExpenseNo", c."ExpenseCateNo", c."ExpenseName", c."ContractNo", c."ContractID",  
+        c."VendorNo", c."PartnerNo", c."ClearanceNo", c."I2", c."I4", c."I5", c."I6", c."TH",  
+        CASE c."TH"  
+            WHEN '5' THEN :companyName  
+            WHEN '4' THEN :companyName  
+            WHEN '2' THEN c.pname  
+            ELSE c.vname  
+        END AS "ItemName1",  
+        CASE c."TH"  
+            WHEN '5' THEN g.s * SUM(CASE WHEN c."TH" = '5' THEN 1 ELSE 0 END)  
+                                OVER (PARTITION BY c."ExpenseCateNo", c."ExpenseNo", c."ProjectNo")  
+            WHEN '4' THEN cl."ClearanceAmount"  
+            WHEN '3' THEN CASE WHEN cti.dt IN (1,3) THEN cq3.amt END  
+            WHEN '1' THEN CASE WHEN ctn.dt IN (1,3) THEN cq1.amt END  
+            WHEN '2' THEN CASE WHEN cti.dt IN (1,3) THEN cq2.amt END  
+        END AS "I1"  
+    FROM classified c  
+    LEFT JOIN glm094 g       ON g.en = c."ExpenseNo" AND g.pn = c."ProjectNo"  
+    LEFT JOIN "clearance" cl ON cl."ClearanceNo" = c."ClearanceNo"  
+    LEFT JOIN cq cq3         ON cq3.cid = c."ContractID" AND cq3.vn = c."VendorNo"  AND cq3.en = c."ExpenseNo"  
+    LEFT JOIN cq cq2         ON cq2.cid = c."ContractID" AND cq2.vn = c."PartnerNo" AND cq2.en = c."ExpenseNo"  
+    LEFT JOIN ctno ctn       ON ctn.cno = c."ContractNo"  
+    LEFT JOIN cq cq1         ON cq1.cid = ctn.cid AND cq1.vn = c."VendorNo" AND cq1.en = c."ExpenseNo"  
+    LEFT JOIN ctid cti       ON cti.cid = c."ContractID"  
+)  
+  
+SELECT * FROM resolved;
+```
+
+sau khi sửa:
+
+```sql
+  
+WITH  
+gl_grp AS (  
+    /*+ MATERIALIZE */  
+    -- 1 LẦN SCAN duy nhất thay cho 8 lần. Điều kiện của mỗi nhánh gốc    -- được đưa vào CASE WHEN riêng, KHÔNG đổi ngữ nghĩa, KHÔNG gộp cột.    SELECT  
+        A."ProjectNo"     AS "ProjectNo",  
+        EC."ExpenseNo"    AS "ExpenseNo",  
+        EC."CateNo"       AS "ExpenseCateNo",  
+        A."ContractNo"    AS "ContractNo",  
+        A."VendorNo"      AS "VendorNo",  
+        A."ClearanceNo"   AS "ClearanceNo",  
+        A."PartnerNo"     AS "PartnerNo",  
+        MIN(A."ExpenseName")  AS "ExpenseName",  
+        MIN(A."ProjectName")  AS "ProjectName",  
+        MIN(A."ContractID")   AS "ContractID",  
+  
+        -- B1 (I2, gốc: sub-select 1)  
+        SUM(CASE WHEN SUBSTR(A."AccountNo",1,4) IN ('2431','2412')  
+                  AND A."InTransTypeID" NOT IN (33,34,35)  
+                 THEN A."LCAmount" ELSE 0 END) AS b1_amt,  
+  
+        -- B2 (I4 phần 1, gốc: sub-select 2)  
+        SUM(CASE WHEN A."InTransTypeID" IN (2,11,21,7,17,26) AND A."PostType" = 2  
+                  AND (SUBSTR(A."AccountNo",1,6) IN ('008111','008121','008211','008221')  
+                    OR SUBSTR(A."AccountNo",1,5) IN ('00911','00921','00931','00411','00421','00621','00611')  
+                    OR SUBSTR(A."AccountNo",1,3) IN ('014','097'))  
+                 THEN A."LCAmount" ELSE 0 END) AS b2_amt,  
+  
+        -- B3 (I4 phần 2 - 013, gốc: sub-select 3)  
+        SUM(CASE WHEN A."PostType" = 2 AND SUBSTR(A."AccountNo",1,3) IN ('013')  
+                 THEN A."LCAmount" ELSE 0 END) AS b3_amt,  
+  
+        -- B4 (I5 phần 1, gốc: sub-select 4)  
+        SUM(CASE WHEN A."InTransTypeID" IN (3,12,22,8,18,27,30,38,36) AND A."PostType" = 2  
+                  AND (SUBSTR(A."AccountNo",1,6) IN ('008112','008122','008212','008222')  
+                    OR SUBSTR(A."AccountNo",1,5) IN ('00912','00922','00932','00412','00422','00622','00612')  
+                    OR SUBSTR(A."AccountNo",1,3) IN ('012','014','013','097'))  
+                 THEN A."LCAmount" ELSE 0 END) AS b4_amt,  
+  
+        -- B5 (I5 phần 2 - 013, GIỚI HẠN fromDate..toDate, gốc: sub-select 5)  
+        -- Lưu ý: điều kiện PostDate <= toDateIso đã có ở WHERE ngoài (áp dụng chung mọi nhánh),        -- ở đây chỉ cần bổ sung cận dưới fromDateIso cho đúng nhánh gốc.        SUM(CASE WHEN A."PostDate" >= TO_DATE(:fromDateIso,'YYYY-MM-DD')  
+                  AND A."PostType" = 2 AND SUBSTR(A."AccountNo",1,3) IN ('013')  
+                 THEN A."LCAmount" ELSE 0 END) AS b5_amt,  
+  
+        -- B6 (I6 phần 1, gốc: sub-select 6)  
+        SUM(CASE WHEN A."InTransTypeID" IN (2,11,21,14,7,17,26) AND A."PostType" = 2  
+                  AND (SUBSTR(A."AccountNo",1,6) IN ('008111','008121','008211','008221')  
+                    OR SUBSTR(A."AccountNo",1,5) IN ('00911','00921','00931','00411','00421','00621','00611')  
+                    OR SUBSTR(A."AccountNo",1,3) IN ('014','097'))  
+                 THEN A."LCAmount" ELSE 0 END) AS b6_amt,  
+  
+        -- B7 (I6 phần 2, gốc: sub-select 7)  
+        SUM(CASE WHEN A."InTransTypeID" IN (4,13,23,14) AND A."PostType" = 2  
+                  AND (SUBSTR(A."AccountNo",1,6) IN ('008111','008121','008211','008221')  
+                    OR SUBSTR(A."AccountNo",1,5) IN ('00911','00921','00931','00411','00421','00621','00611')  
+                    OR SUBSTR(A."AccountNo",1,3) IN ('014','097'))  
+                 THEN A."LCAmount" ELSE 0 END) AS b7_amt,  
+  
+        -- B8 (I6 phần 3 - 013, PostType=1, gốc: sub-select 8)  
+        SUM(CASE WHEN A."PostType" = 1 AND SUBSTR(A."AccountNo",1,3) IN ('013')  
+                 THEN A."LCAmount" ELSE 0 END) AS b8_amt  
+  
+    FROM "glm_gl_books" A  
+    INNER JOIN "expense_cate" EC ON A."ExpenseID" = EC."ExpenseID"  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD')  
+      AND EC."CateNo" IN ('2005203','2005204','2005205','2005206','2005207','2005208','2005209')  
+--       <if test="filter.companyNoPrefix != null">  
+--       AND SUBSTR(A."CompanyNo", 1, #{filter.companyPrefixLen}) = #{filter.companyNoPrefix}  
+--       </if>  
+--       <if test="filter.projectNo != null">  
+--       AND A."ProjectNo" LIKE #{filter.projectNo} || '%'  
+--       </if>  
+--       <if test="filter.provinceNo != null">  
+--       AND A."ProvinceNo" = #{filter.provinceNo}  
+--       </if>  
+--       <if test="filter.communeNo != null">  
+--       AND A."CommuneNo" = #{filter.communeNo}  
+--       </if>  
+--       <if test="filter.projectId != null">  
+--       AND A."ProjectID" = #{filter.projectId}  
+--       </if>  
+      AND A."ProjectNo" IS NOT NULL AND EC."ExpenseNo" IS NOT NULL  
+    GROUP BY A."ProjectNo", EC."ExpenseNo", EC."CateNo", A."ContractNo", A."VendorNo", A."ClearanceNo", A."PartnerNo"  
+),  
+  
+leaves AS (  
+    SELECT g."ProjectNo" || '#' || g."ExpenseCateNo" || '#' || g."ExpenseNo" AS "ItemID",  
+           g."ProjectNo" AS "EntityID",  
+           g."ProjectNo" || '#' || g."ExpenseCateNo" AS "ParentID",  
+           g."ExpenseName" AS "ItemName",  
+           g."ProjectNo" AS "ProjectNo",  
+           g."ProjectName" AS "ProjectName",  
+           g."ExpenseNo" AS "ExpenseNo",  
+           g."ExpenseCateNo" AS "ExpenseCateNo",  
+           g."ExpenseName" AS "ExpenseName",  
+           g."ContractNo" AS "ContractNo",  
+           g."ContractID" AS "ContractID",  
+           g."VendorNo" AS "VendorNo",  
+           g."PartnerNo" AS "PartnerNo",  
+           g."ClearanceNo" AS "ClearanceNo",  
+           g.b1_amt AS "I2", 0 AS "I4", 0 AS "I5", 0 AS "I6"  
+    FROM gl_grp g WHERE g.b1_amt > 0  
+  
+    UNION ALL  
+    SELECT g."ProjectNo" || '#' || g."ExpenseCateNo" || '#' || g."ExpenseNo", g."ProjectNo",  
+           g."ProjectNo" || '#' || g."ExpenseCateNo", g."ExpenseName", g."ProjectNo", g."ProjectName",  
+           g."ExpenseNo", g."ExpenseCateNo", g."ExpenseName", g."ContractNo", g."ContractID",  
+           g."VendorNo", g."PartnerNo", g."ClearanceNo",  
+           0, -g.b2_amt, 0, 0  
+    FROM gl_grp g WHERE g.b2_amt != 0  
+  
+    UNION ALL  
+    SELECT g."ProjectNo" || '#' || g."ExpenseCateNo" || '#' || g."ExpenseNo", g."ProjectNo",  
+           g."ProjectNo" || '#' || g."ExpenseCateNo", g."ExpenseName", g."ProjectNo", g."ProjectName",  
+           g."ExpenseNo", g."ExpenseCateNo", g."ExpenseName", g."ContractNo", g."ContractID",  
+           g."VendorNo", g."PartnerNo", g."ClearanceNo",  
+           0, -g.b3_amt, 0, 0  
+    FROM gl_grp g WHERE g.b3_amt != 0  
+  
+    UNION ALL  
+    SELECT g."ProjectNo" || '#' || g."ExpenseCateNo" || '#' || g."ExpenseNo", g."ProjectNo",  
+           g."ProjectNo" || '#' || g."ExpenseCateNo", g."ExpenseName", g."ProjectNo", g."ProjectName",  
+           g."ExpenseNo", g."ExpenseCateNo", g."ExpenseName", g."ContractNo", g."ContractID",  
+           g."VendorNo", g."PartnerNo", g."ClearanceNo",  
+           0, 0, -g.b4_amt, 0  
+    FROM gl_grp g WHERE g.b4_amt != 0  
+  
+    UNION ALL  
+    SELECT g."ProjectNo" || '#' || g."ExpenseCateNo" || '#' || g."ExpenseNo", g."ProjectNo",  
+           g."ProjectNo" || '#' || g."ExpenseCateNo", g."ExpenseName", g."ProjectNo", g."ProjectName",  
+           g."ExpenseNo", g."ExpenseCateNo", g."ExpenseName", g."ContractNo", g."ContractID",  
+           g."VendorNo", g."PartnerNo", g."ClearanceNo",  
+           0, 0, -g.b5_amt, 0  
+    FROM gl_grp g WHERE g.b5_amt != 0  
+  
+    UNION ALL  
+    SELECT g."ProjectNo" || '#' || g."ExpenseCateNo" || '#' || g."ExpenseNo", g."ProjectNo",  
+           g."ProjectNo" || '#' || g."ExpenseCateNo", g."ExpenseName", g."ProjectNo", g."ProjectName",  
+           g."ExpenseNo", g."ExpenseCateNo", g."ExpenseName", g."ContractNo", g."ContractID",  
+           g."VendorNo", g."PartnerNo", g."ClearanceNo",  
+           0, 0, 0, -g.b6_amt  
+    FROM gl_grp g WHERE g.b6_amt != 0  
+  
+    UNION ALL  
+    SELECT g."ProjectNo" || '#' || g."ExpenseCateNo" || '#' || g."ExpenseNo", g."ProjectNo",  
+           g."ProjectNo" || '#' || g."ExpenseCateNo", g."ExpenseName", g."ProjectNo", g."ProjectName",  
+           g."ExpenseNo", g."ExpenseCateNo", g."ExpenseName", g."ContractNo", g."ContractID",  
+           g."VendorNo", g."PartnerNo", g."ClearanceNo",  
+           0, 0, 0, -g.b7_amt  
+    FROM gl_grp g WHERE g.b7_amt != 0  
+  
+    UNION ALL  
+    SELECT g."ProjectNo" || '#' || g."ExpenseCateNo" || '#' || g."ExpenseNo", g."ProjectNo",  
+           g."ProjectNo" || '#' || g."ExpenseCateNo", g."ExpenseName", g."ProjectNo", g."ProjectName",  
+           g."ExpenseNo", g."ExpenseCateNo", g."ExpenseName", g."ContractNo", g."ContractID",  
+           g."VendorNo", g."PartnerNo", g."ClearanceNo",  
+           0, 0, 0, -g.b8_amt  
+    FROM gl_grp g WHERE g.b8_amt != 0  
+),  
+  
+glm094 AS (  
+    SELECT A."ExpenseNo" AS en, A."ProjectNo" AS pn, SUM(A."LCAmount") AS s  
+    FROM "glm_gl_books_v1" A  
+    WHERE A."PostDate" <= TO_DATE(:toDateIso,'YYYY-MM-DD') AND A."PostType" = 1  
+      AND SUBSTR(A."AccountNo",1,3) = '094'  
+--       <include refid="m1WhereBase"/>  
+    GROUP BY A."ExpenseNo", A."ProjectNo"  
+),  
+cq AS (  
+    SELECT "ContractID" AS cid, "VendorNo" AS vn, "ExpenseNo" AS en, SUM("LCAmount") AS amt  
+    FROM "contract_quantity" GROUP BY "ContractID", "VendorNo", "ExpenseNo"  
+),  
+ctid AS (  
+    SELECT "ContractID" AS cid, MAX("DocumentType") AS dt FROM "contract" GROUP BY "ContractID"  
+),  
+ctno AS (  
+    SELECT "ContractNo" AS cno, MIN("ContractID") AS cid, MAX("DocumentType") AS dt  
+    FROM "contract" GROUP BY "ContractNo"  
+),  
+  
+classified AS (  
+    SELECT l.*,  
+        CASE  
+            WHEN l."ClearanceNo" IS NULL AND l."ContractNo" IS NULL AND v."VendorName" IS NOT NULL THEN '6'  
+            WHEN l."VendorNo" IS NULL AND l."ContractNo" IS NULL AND l."ClearanceNo" IS NULL THEN '5'  
+            WHEN l."ContractNo" IS NULL AND l."ClearanceNo" IS NOT NULL THEN '4'  
+            WHEN l."ClearanceNo" IS NULL AND l."ContractNo" IS NOT NULL AND p."PartnerName" IS NOT NULL THEN '2'  
+            WHEN l."ClearanceNo" IS NULL AND l."ContractNo" IS NOT NULL AND v."VendorName" IS NOT NULL THEN '1'  
+            WHEN l."ContractNo" IS NOT NULL AND l."ClearanceNo" IS NOT NULL AND v."VendorName" IS NOT NULL THEN '3'  
+        END AS "TH",  
+        v."VendorName" AS vname, p."PartnerName" AS pname  
+    FROM leaves l  
+    LEFT JOIN "vendor"  v ON v."VendorNo"  = l."VendorNo"  
+    LEFT JOIN "partner" p ON p."PartnerNo" = l."PartnerNo"  
+),  
+resolved AS (  
+    SELECT c."ItemID", c."EntityID", c."ParentID", c."ItemName", c."ProjectNo", c."ProjectName",  
+           c."ExpenseNo", c."ExpenseCateNo", c."ExpenseName", c."ContractNo", c."ContractID",  
+           c."VendorNo", c."PartnerNo", c."ClearanceNo", c."I2", c."I4", c."I5", c."I6", c."TH",  
+        CASE c."TH" WHEN '5' THEN :companyName WHEN '4' THEN :companyName  
+                    WHEN '2' THEN c.pname ELSE c.vname END AS "ItemName1",  
+        CASE c."TH"  
+            WHEN '5' THEN g.s * SUM(CASE WHEN c."TH" = '5' THEN 1 ELSE 0 END)  
+                                OVER (PARTITION BY c."ExpenseCateNo", c."ExpenseNo", c."ProjectNo")  
+            WHEN '4' THEN cl."ClearanceAmount"  
+            WHEN '3' THEN CASE WHEN cti.dt IN (1,3) THEN cq3.amt END  
+            WHEN '1' THEN CASE WHEN ctn.dt IN (1,3) THEN cq1.amt END  
+            WHEN '2' THEN CASE WHEN cti.dt IN (1,3) THEN cq2.amt END  
+        END AS "I1"  
+    FROM classified c  
+    LEFT JOIN glm094 g       ON g.en = c."ExpenseNo" AND g.pn = c."ProjectNo"  
+    LEFT JOIN "clearance" cl ON cl."ClearanceNo" = c."ClearanceNo"  
+    LEFT JOIN cq cq3         ON cq3.cid = c."ContractID" AND cq3.vn = c."VendorNo"  AND cq3.en = c."ExpenseNo"  
+    LEFT JOIN cq cq2         ON cq2.cid = c."ContractID" AND cq2.vn = c."PartnerNo" AND cq2.en = c."ExpenseNo"  
+    LEFT JOIN ctno ctn       ON ctn.cno = c."ContractNo"  
+    LEFT JOIN cq cq1         ON cq1.cid = ctn.cid AND cq1.vn = c."VendorNo" AND cq1.en = c."ExpenseNo"  
+    LEFT JOIN ctid cti       ON cti.cid = c."ContractID"  
+)  
+SELECT * FROM resolved;
+```
+
+
+Với dữ liệu bảng glm_gl_books 1 triệu bản ghi cost giảm từ 245K -> xuống 54552
+
+# 7. B209Leaf
+	Làm tương tự với `6. B209M1Leaf` vì Cùng pattern với B209M1
+
